@@ -2025,6 +2025,25 @@ impl crate::Context for Context {
         }
     }
 
+    fn command_encoder_fill_buffer(
+        &self,
+        encoder: &Self::CommandEncoderId,
+        buffer: &crate::Buffer,
+        offset: wgt::BufferAddress,
+        size: Option<wgt::BufferSize>,
+        value: u8,
+    ) {
+        let global = &self.0;
+        if let Err(cause) = wgc::gfx_select!(encoder.id => global.command_encoder_fill_buffer(
+            encoder.id,
+            buffer.id.id,
+            offset, size,
+            value
+        )) {
+            self.handle_error_nolabel(&encoder.error_sink, cause, "CommandEncoder::fill_buffer");
+        }
+    }
+
     fn command_encoder_insert_debug_marker(&self, encoder: &Self::CommandEncoderId, label: &str) {
         let global = &self.0;
         if let Err(cause) = wgc::gfx_select!(encoder.id => global.command_encoder_insert_debug_marker(encoder.id, label))

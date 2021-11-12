@@ -431,6 +431,14 @@ trait Context: Debug + Send + Sized + Sync {
         offset: BufferAddress,
         size: Option<BufferSize>,
     );
+    fn command_encoder_fill_buffer(
+        &self,
+        encoder: &Self::CommandEncoderId,
+        buffer: &Buffer,
+        offset: BufferAddress,
+        size: Option<BufferSize>,
+        value: u8,
+    );
 
     fn command_encoder_insert_debug_marker(&self, encoder: &Self::CommandEncoderId, label: &str);
     fn command_encoder_push_debug_group(&self, encoder: &Self::CommandEncoderId, label: &str);
@@ -2372,6 +2380,23 @@ impl CommandEncoder {
             buffer,
             offset,
             size,
+        );
+    }
+
+    pub fn fill_buffer(
+        &mut self,
+        buffer: &Buffer,
+        offset: BufferAddress,
+        size: Option<BufferSize>,
+        value: u8,
+    ) {
+        Context::command_encoder_fill_buffer(
+            &*self.context,
+            self.id.as_ref().unwrap(),
+            buffer,
+            offset,
+            size,
+            value,
         );
     }
 

@@ -43,6 +43,8 @@ pub enum ClearError {
     },
     #[error("destination buffer/texture is missing the `COPY_DST` usage flag")]
     MissingCopyDstUsageFlag(Option<BufferId>, Option<TextureId>),
+    #[error("destination buffer is missing the `STORAGE` usage flag")]
+    MissingStorageUsageFlag(BufferId),
     #[error("texture lacks the aspects that were specified in the image subresource range. Texture with format {texture_format:?}, specified was {subresource_range_aspects:?}")]
     MissingTextureAspect {
         texture_format: wgt::TextureFormat,
@@ -148,6 +150,90 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
         unsafe {
             cmd_buf_raw.transition_buffers(dst_barrier);
             cmd_buf_raw.clear_buffer(dst_raw, offset..end);
+        }
+        Ok(())
+    }
+
+    pub fn command_encoder_fill_buffer<A: HalApi>(
+        &self,
+        command_encoder_id: CommandEncoderId,
+        dst: BufferId,
+        offset: BufferAddress,
+        size: Option<BufferSize>,
+        value: u8,
+    ) -> Result<(), ClearError> {
+        profiling::scope!("CommandEncoder::fill_buffer");
+
+        let hub = A::hub(self);
+        let mut token = Token::root();
+        let (mut cmd_buf_guard, mut token) = hub.command_buffers.write(&mut token);
+        let cmd_buf = CommandBuffer::get_encoder_mut(&mut *cmd_buf_guard, command_encoder_id)
+            .map_err(|_| ClearError::InvalidCommandEncoder(command_encoder_id))?;
+        let (buffer_guard, _) = hub.buffers.read(&mut token);
+
+        #[cfg(feature = "trace")]
+        if let Some(ref mut list) = cmd_buf.commands {
+            list.push(TraceCommand::ClearBuffer { dst, offset, size });
+        }
+
+        let (dst_buffer, dst_pending) = cmd_buf
+            .trackers
+            .buffers
+            .use_replace(&*buffer_guard, dst, (), hal::BufferUses::COPY_DST)
+            .map_err(ClearError::InvalidBuffer)?;
+        let dst_raw = dst_buffer
+            .raw
+            .as_ref()
+            .ok_or(ClearError::InvalidBuffer(dst))?;
+        if !dst_buffer.usage.contains(BufferUsages::COPY_DST) {
+            return Err(ClearError::MissingCopyDstUsageFlag(Some(dst), None));
+        }
+        // Only D3D12
+        // if !dst_buffer.usage.contains(BufferUsages::STORAGE) {
+        //     return Err(ClearError::MissingStorageUsageFlag(dst));
+        // }
+
+        // Check if offset & size are valid.
+        if offset % wgt::COPY_BUFFER_ALIGNMENT != 0 {
+            return Err(ClearError::UnalignedBufferOffset(offset));
+        }
+        if let Some(size) = size {
+            if size.get() % wgt::COPY_BUFFER_ALIGNMENT != 0 {
+                return Err(ClearError::UnalignedFillSize(size));
+            }
+            let destination_end_offset = offset + size.get();
+            if destination_end_offset > dst_buffer.size {
+                return Err(ClearError::BufferOverrun {
+                    start_offset: offset,
+                    end_offset: destination_end_offset,
+                    buffer_size: dst_buffer.size,
+                });
+            }
+        }
+
+        let end = match size {
+            Some(size) => offset + size.get(),
+            None => dst_buffer.size,
+        };
+        if offset == end {
+            log::trace!("Ignoring clear_buffer of size 0");
+            return Ok(());
+        }
+
+        // Mark dest as initialized.
+        cmd_buf
+            .buffer_memory_init_actions
+            .extend(dst_buffer.initialization_status.create_action(
+                dst,
+                offset..end,
+                MemoryInitKind::ImplicitlyInitialized,
+            ));
+        // actual hal barrier & operation
+        let dst_barrier = dst_pending.map(|pending| pending.into_hal(dst_buffer));
+        let cmd_buf_raw = cmd_buf.encoder.open();
+        unsafe {
+            cmd_buf_raw.transition_buffers(dst_barrier);
+            cmd_buf_raw.fill_buffer(dst_raw, offset..end, value);
         }
         Ok(())
     }

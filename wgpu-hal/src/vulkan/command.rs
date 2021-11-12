@@ -194,6 +194,16 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
         );
     }
 
+    unsafe fn fill_buffer(&mut self, buffer: &super::Buffer, range: crate::MemoryRange, data: u8) {
+        self.device.raw.cmd_fill_buffer(
+            self.active,
+            buffer.raw,
+            range.start,
+            range.end - range.start,
+            data as u32,
+        );
+    }
+
     unsafe fn copy_buffer_to_buffer<T>(
         &mut self,
         src: &super::Buffer,
