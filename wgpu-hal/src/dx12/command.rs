@@ -1,6 +1,6 @@
 use super::{conv, HResult as _};
 use std::{mem, ops::Range, ptr};
-use winapi::um::d3d12;
+use winapi::{shared::dxgiformat, um::d3d12};
 
 fn make_box(origin: &wgt::Origin3d, size: &crate::CopyExtent) -> d3d12::D3D12_BOX {
     d3d12::D3D12_BOX {
@@ -373,8 +373,41 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
 
     unsafe fn fill_buffer(&mut self, buffer: &super::Buffer, range: crate::MemoryRange, value: u8) {
         let list = self.list.unwrap();
-        let heap_gpu = &self.shared.heap_views;
-        let heap_cpu = &self.shared.heap_view_cpu;
+
+        // https://docs.microsoft.com/en-gb/windows/win32/direct3d12/non-shader-visible-descriptor-heaps?redirectedfrom=MSDN
+        let heap_gpu = &self.shared.heap_views; // SHARED => CPU write only
+        let heap_cpu = &self.shared.heap_view_cpu; // NON-SHARED => CPU read/write
+
+        let gpu_index = heap_gpu.allocate_slice(buffer.size).unwrap();
+
+        let gpu_dual_handle = heap_gpu.at(gpu_index, buffer.size);
+        let cpu_handle = heap_cpu.alloc_handle();
+
+        let mut uav_desc = d3d12::D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: dxgiformat::DXGI_FORMAT_R32_TYPELESS,
+            ViewDimension: d3d12::D3D12_UAV_DIMENSION_BUFFER,
+            u: mem::zeroed(),
+        };
+        *uav_desc.u.Buffer_mut() = d3d12::D3D12_BUFFER_UAV {
+            FirstElement: 0,
+            NumElements: (buffer.size / 4) as u32,
+            StructureByteStride: 0,
+            CounterOffsetInBytes: 0,
+            Flags: d3d12::D3D12_BUFFER_UAV_FLAG_RAW,
+        };
+        self.device.CreateUnorderedAccessView(
+            buffer.resource.as_mut_ptr(),
+            ptr::null_mut(),
+            &uav_desc,
+            cpu_handle,
+        );
+
+        self.device.CopyDescriptorsSimple(
+            1,
+            gpu_dual_handle.cpu,
+            cpu_handle,
+            d3d12::D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+        );
 
         let raw_rect = d3d12::D3D12_RECT {
             left: (range.start / 4) as i32,
@@ -385,37 +418,22 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
 
         let values = [value as u32; 4];
 
-        println!("Allocation");
-
-        let gpu_index = heap_gpu.allocate_slice(buffer.size).unwrap();
-        let gpu_copy_index = heap_gpu.allocate_slice(buffer.size).unwrap();
-
-        println!("Handles");
-
-        let gpu_handle = heap_gpu.at(gpu_index, buffer.size);
-        let gpu_copy_handle = heap_gpu.at(gpu_copy_index, buffer.size);
-
-        let cpu_handle = heap_cpu.alloc_handle();
-
-        println!("Copy cpu handle to gpu");
-
-        self.device.CopyDescriptorsSimple(
-            1,
-            gpu_copy_handle.cpu,
-            cpu_handle,
-            d3d12::D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-        );
-
-        println!(
-            "GPU handle: {:x}\nGPU copy handle {:x}\nGPU CPU copy handle {:x}\nCPU handle {:x}",
-            gpu_handle.gpu.ptr, gpu_copy_handle.gpu.ptr, gpu_copy_handle.cpu.ptr, cpu_handle.ptr
-        );
-
-        println!("Fill");
+        let mut barrier = d3d12::D3D12_RESOURCE_BARRIER {
+            Type: d3d12::D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            Flags: d3d12::D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            u: mem::zeroed(),
+        };
+        *barrier.u.Transition_mut() = d3d12::D3D12_RESOURCE_TRANSITION_BARRIER {
+            pResource: buffer.resource.as_mut_ptr(),
+            StateBefore: d3d12::D3D12_RESOURCE_STATE_COPY_DEST,
+            StateAfter: d3d12::D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+            Subresource: 0,
+        };
+        list.ResourceBarrier(1, &barrier);
 
         list.ClearUnorderedAccessViewUint(
-            gpu_handle.gpu,
-            gpu_copy_handle.cpu,
+            gpu_dual_handle.gpu, // SHARED and SetDescriptorHeaps. Pointing UAV
+            cpu_handle,          // NON-SHARED. Pointing UAV
             buffer.resource.as_mut_ptr(),
             &values,
             1,

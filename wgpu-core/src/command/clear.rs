@@ -189,9 +189,9 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             return Err(ClearError::MissingCopyDstUsageFlag(Some(dst), None));
         }
         // Only D3D12
-        // if !dst_buffer.usage.contains(BufferUsages::STORAGE) {
-        //     return Err(ClearError::MissingStorageUsageFlag(dst));
-        // }
+        if !dst_buffer.usage.contains(BufferUsages::STORAGE) {
+            return Err(ClearError::MissingStorageUsageFlag(dst));
+        }
 
         // Check if offset & size are valid.
         if offset % wgt::COPY_BUFFER_ALIGNMENT != 0 {
