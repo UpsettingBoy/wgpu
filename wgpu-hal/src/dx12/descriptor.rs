@@ -2,13 +2,13 @@ use super::HResult as _;
 use bit_set::BitSet;
 use parking_lot::Mutex;
 use range_alloc::RangeAllocator;
-use std::fmt;
+use std::{fmt, sync::atomic::AtomicU64};
 
 const HEAP_SIZE_FIXED: usize = 64;
 
 #[derive(Copy, Clone)]
 pub(super) struct DualHandle {
-    cpu: native::CpuDescriptor,
+    pub cpu: native::CpuDescriptor,
     pub gpu: native::GpuDescriptor,
     /// How large the block allocated to this handle is.
     count: u64,
@@ -105,19 +105,19 @@ impl GeneralHeap {
 }
 
 /// Fixed-size free-list allocator for CPU descriptors.
-struct FixedSizeHeap {
-    raw: native::DescriptorHeap,
+pub(super) struct FixedSizeHeap {
+    pub raw: native::DescriptorHeap,
     /// Bit flag representation of available handles in the heap.
     ///
     ///  0 - Occupied
     ///  1 - free
-    availability: u64,
+    availability: AtomicU64,
     handle_size: usize,
     start: native::CpuDescriptor,
 }
 
 impl FixedSizeHeap {
-    fn new(device: native::Device, ty: native::DescriptorHeapType) -> Self {
+    pub(super) fn new(device: native::Device, ty: native::DescriptorHeapType) -> Self {
         let (heap, _hr) = device.create_descriptor_heap(
             HEAP_SIZE_FIXED as _,
             ty,
@@ -127,36 +127,46 @@ impl FixedSizeHeap {
 
         Self {
             handle_size: device.get_descriptor_increment_size(ty) as _,
-            availability: !0, // all free!
+            availability: AtomicU64::new(!0), // all free!
             start: heap.start_cpu_descriptor(),
             raw: heap,
         }
     }
 
-    fn alloc_handle(&mut self) -> native::CpuDescriptor {
+    pub(super) fn alloc_handle(&self) -> native::CpuDescriptor {
+        let mut availability = self.availability.load(std::sync::atomic::Ordering::Relaxed);
         // Find first free slot.
-        let slot = self.availability.trailing_zeros() as usize;
+        let slot = availability.clone().trailing_zeros() as usize;
         assert!(slot < HEAP_SIZE_FIXED);
         // Set the slot as occupied.
-        self.availability ^= 1 << slot;
+        availability ^= 1 << slot;
+
+        self.availability
+            .store(availability, std::sync::atomic::Ordering::Relaxed);
 
         native::CpuDescriptor {
             ptr: self.start.ptr + self.handle_size * slot,
         }
     }
 
-    fn free_handle(&mut self, handle: native::CpuDescriptor) {
+    pub(super) fn free_handle(&self, handle: native::CpuDescriptor) {
         let slot = (handle.ptr - self.start.ptr) / self.handle_size;
         assert!(slot < HEAP_SIZE_FIXED);
-        assert_eq!(self.availability & (1 << slot), 0);
-        self.availability ^= 1 << slot;
+
+        let mut availability = self.availability.load(std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(availability & (1 << slot), 0);
+        availability ^= 1 << slot;
+
+        self.availability
+            .store(availability, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn is_full(&self) -> bool {
-        self.availability == 0
+    pub(super) fn is_full(&self) -> bool {
+        self.availability.load(std::sync::atomic::Ordering::Relaxed) == 0
     }
 
-    unsafe fn destroy(&self) {
+    pub(super) unsafe fn destroy(&self) {
         self.raw.destroy();
     }
 }

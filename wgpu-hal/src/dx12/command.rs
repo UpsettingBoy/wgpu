@@ -33,7 +33,11 @@ impl super::CommandEncoder {
         }
         self.pass.dirty_root_elements = 0;
         self.pass.dirty_vertex_buffers = 0;
-        list.set_descriptor_heaps(&[self.shared.heap_views.raw, self.shared.heap_samplers.raw]);
+        list.set_descriptor_heaps(&[
+            self.shared.heap_views.raw,
+            self.shared.heap_samplers.raw,
+            // self.shared.heap_view_cpu_rw.raw,
+        ]);
     }
 
     unsafe fn end_pass(&mut self) {
@@ -367,13 +371,56 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
         }
     }
 
-    unsafe fn fill_buffer(
-        &mut self,
-        _buffer: &super::Buffer,
-        _range: crate::MemoryRange,
-        _value: u8,
-    ) {
-        todo!()
+    unsafe fn fill_buffer(&mut self, buffer: &super::Buffer, range: crate::MemoryRange, value: u8) {
+        let list = self.list.unwrap();
+        let heap_gpu = &self.shared.heap_views;
+        let heap_cpu = &self.shared.heap_view_cpu;
+
+        let raw_rect = d3d12::D3D12_RECT {
+            left: (range.start / 4) as i32,
+            top: 0,
+            right: (range.end / 4) as i32,
+            bottom: 1,
+        };
+
+        let values = [value as u32; 4];
+
+        println!("Allocation");
+
+        let gpu_index = heap_gpu.allocate_slice(buffer.size).unwrap();
+        let gpu_copy_index = heap_gpu.allocate_slice(buffer.size).unwrap();
+
+        println!("Handles");
+
+        let gpu_handle = heap_gpu.at(gpu_index, buffer.size);
+        let gpu_copy_handle = heap_gpu.at(gpu_copy_index, buffer.size);
+
+        let cpu_handle = heap_cpu.alloc_handle();
+
+        println!("Copy cpu handle to gpu");
+
+        self.device.CopyDescriptorsSimple(
+            1,
+            gpu_copy_handle.cpu,
+            cpu_handle,
+            d3d12::D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+        );
+
+        println!(
+            "GPU handle: {:x}\nGPU copy handle {:x}\nGPU CPU copy handle {:x}\nCPU handle {:x}",
+            gpu_handle.gpu.ptr, gpu_copy_handle.gpu.ptr, gpu_copy_handle.cpu.ptr, cpu_handle.ptr
+        );
+
+        println!("Fill");
+
+        list.ClearUnorderedAccessViewUint(
+            gpu_handle.gpu,
+            gpu_copy_handle.cpu,
+            buffer.resource.as_mut_ptr(),
+            &values,
+            1,
+            &raw_rect,
+        );
     }
 
     unsafe fn copy_buffer_to_buffer<T>(

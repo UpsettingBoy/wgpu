@@ -115,6 +115,10 @@ impl super::Device {
                 native::DescriptorHeapType::CbvSrvUav,
                 capacity_views,
             )?,
+            heap_view_cpu: descriptor::FixedSizeHeap::new(
+                raw,
+                native::DescriptorHeapType::CbvSrvUav,
+            ),
             heap_samplers: descriptor::GeneralHeap::new(
                 raw,
                 native::DescriptorHeapType::Sampler,

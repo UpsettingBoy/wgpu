@@ -223,6 +223,7 @@ struct DeviceShared {
     cmd_signatures: CommandSignatures,
     heap_views: descriptor::GeneralHeap,
     heap_samplers: descriptor::GeneralHeap,
+    heap_view_cpu: descriptor::FixedSizeHeap,
 }
 
 impl DeviceShared {
@@ -231,6 +232,7 @@ impl DeviceShared {
         self.cmd_signatures.destroy();
         self.heap_views.raw.destroy();
         self.heap_samplers.raw.destroy();
+        self.heap_view_cpu.destroy();
     }
 }
 
