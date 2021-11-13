@@ -216,7 +216,7 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
             None => dst_buffer.size,
         };
         if offset == end {
-            log::trace!("Ignoring clear_buffer of size 0");
+            log::trace!("Ignoring fill_buffer of size 0");
             return Ok(());
         }
 

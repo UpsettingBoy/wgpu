@@ -2383,6 +2383,12 @@ impl CommandEncoder {
         );
     }
 
+    /// Fills buffer with `value`.
+    ///
+    /// # Panics
+    ///
+    /// - Buffer does not have `COPY_DST` or `STORAGE` usage.
+    /// - Range it out of bounds
     pub fn fill_buffer(
         &mut self,
         buffer: &Buffer,
