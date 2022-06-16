@@ -2,6 +2,7 @@
 //!
 //! To start using the API, create an [`Instance`].
 
+#![cfg_attr(docsrs, feature(doc_cfg))] // Allow doc(cfg(feature = "")) for showing in docs that something is feature gated.
 #![doc(html_logo_url = "https://raw.githubusercontent.com/gfx-rs/wgpu/master/logo.png")]
 #![warn(missing_docs)]
 
@@ -25,23 +26,33 @@ use std::{
 use parking_lot::Mutex;
 
 pub use wgt::{
-    AdapterInfo, AddressMode, Backend, Backends, BindGroupLayoutEntry, BindingType, BlendComponent,
-    BlendFactor, BlendOperation, BlendState, BufferAddress, BufferBindingType, BufferSize,
-    BufferUsages, Color, ColorTargetState, ColorWrites, CommandBufferDescriptor, CompareFunction,
-    DepthBiasState, DepthStencilState, DeviceType, DownlevelCapabilities, DownlevelFlags,
-    DynamicOffset, Extent3d, Face, Features, FilterMode, FrontFace, ImageDataLayout,
-    ImageSubresourceRange, IndexFormat, Limits, MultisampleState, Origin3d,
-    PipelineStatisticsTypes, PolygonMode, PowerPreference, PresentMode, PrimitiveState,
-    PrimitiveTopology, PushConstantRange, QueryType, RenderBundleDepthStencil, SamplerBorderColor,
-    ShaderLocation, ShaderModel, ShaderStages, StencilFaceState, StencilOperation, StencilState,
-    StorageTextureAccess, SurfaceConfiguration, SurfaceStatus, TextureAspect, TextureDimension,
-    TextureFormat, TextureFormatFeatureFlags, TextureFormatFeatures, TextureSampleType,
-    TextureUsages, TextureViewDimension, VertexAttribute, VertexFormat, VertexStepMode,
-    COPY_BUFFER_ALIGNMENT, COPY_BYTES_PER_ROW_ALIGNMENT, MAP_ALIGNMENT, PUSH_CONSTANT_ALIGNMENT,
-    QUERY_RESOLVE_BUFFER_ALIGNMENT, QUERY_SET_MAX_QUERIES, QUERY_SIZE, VERTEX_STRIDE_ALIGNMENT,
+    AdapterInfo, AddressMode, AstcBlock, AstcChannel, Backend, Backends, BindGroupLayoutEntry,
+    BindingType, BlendComponent, BlendFactor, BlendOperation, BlendState, BufferAddress,
+    BufferBindingType, BufferSize, BufferUsages, Color, ColorTargetState, ColorWrites,
+    CommandBufferDescriptor, CompareFunction, DepthBiasState, DepthStencilState, DeviceType,
+    DownlevelCapabilities, DownlevelFlags, DynamicOffset, Extent3d, Face, Features, FilterMode,
+    FrontFace, ImageDataLayout, ImageSubresourceRange, IndexFormat, Limits, MultisampleState,
+    Origin3d, PipelineStatisticsTypes, PolygonMode, PowerPreference, PresentMode, PrimitiveState,
+    PrimitiveTopology, PushConstantRange, QueryType, RenderBundleDepthStencil, SamplerBindingType,
+    SamplerBorderColor, ShaderLocation, ShaderModel, ShaderStages, StencilFaceState,
+    StencilOperation, StencilState, StorageTextureAccess, SurfaceConfiguration, SurfaceStatus,
+    TextureAspect, TextureDimension, TextureFormat, TextureFormatFeatureFlags,
+    TextureFormatFeatures, TextureSampleType, TextureUsages, TextureViewDimension, VertexAttribute,
+    VertexFormat, VertexStepMode, COPY_BUFFER_ALIGNMENT, COPY_BYTES_PER_ROW_ALIGNMENT,
+    MAP_ALIGNMENT, PUSH_CONSTANT_ALIGNMENT, QUERY_RESOLVE_BUFFER_ALIGNMENT, QUERY_SET_MAX_QUERIES,
+    QUERY_SIZE, VERTEX_STRIDE_ALIGNMENT,
 };
 
 use backend::{BufferMappedRange, Context as C};
+
+/// Filter for error scopes.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
+pub enum ErrorFilter {
+    /// Catch only out-of-memory errors.
+    OutOfMemory,
+    /// Catch only validation errors.
+    Validation,
+}
 
 trait ComputePassInner<Ctx: Context> {
     fn set_pipeline(&mut self, pipeline: &Ctx::ComputePipelineId);
@@ -58,8 +69,8 @@ trait ComputePassInner<Ctx: Context> {
     fn write_timestamp(&mut self, query_set: &Ctx::QuerySetId, query_index: u32);
     fn begin_pipeline_statistics_query(&mut self, query_set: &Ctx::QuerySetId, query_index: u32);
     fn end_pipeline_statistics_query(&mut self);
-    fn dispatch(&mut self, x: u32, y: u32, z: u32);
-    fn dispatch_indirect(
+    fn dispatch_workgroups(&mut self, x: u32, y: u32, z: u32);
+    fn dispatch_workgroups_indirect(
         &mut self,
         indirect_buffer: &Ctx::BufferId,
         indirect_offset: BufferAddress,
@@ -176,12 +187,12 @@ trait Context: Debug + Send + Sized + Sync {
     type SurfaceId: Debug + Send + Sync + 'static;
 
     type SurfaceOutputDetail: Send;
+    type SubmissionIndex: Debug + Copy + Clone + Send + 'static;
 
     type RequestAdapterFuture: Future<Output = Option<Self::AdapterId>> + Send;
     type RequestDeviceFuture: Future<Output = Result<(Self::DeviceId, Self::QueueId), RequestDeviceError>>
         + Send;
-    type MapAsyncFuture: Future<Output = Result<(), BufferAsyncError>> + Send;
-    type OnSubmittedWorkDoneFuture: Future<Output = ()> + Send;
+    type PopErrorScopeFuture: Future<Output = Option<Error>> + Send;
 
     fn init(backends: Backends) -> Self;
     fn instance_create_surface(
@@ -198,7 +209,7 @@ trait Context: Debug + Send + Sized + Sync {
         desc: &DeviceDescriptor,
         trace_dir: Option<&std::path::Path>,
     ) -> Self::RequestDeviceFuture;
-    fn instance_poll_all_devices(&self, force_wait: bool);
+    fn instance_poll_all_devices(&self, force_wait: bool) -> bool;
     fn adapter_is_surface_supported(
         &self,
         adapter: &Self::AdapterId,
@@ -206,7 +217,7 @@ trait Context: Debug + Send + Sized + Sync {
     ) -> bool;
     fn adapter_features(&self, adapter: &Self::AdapterId) -> Features;
     fn adapter_limits(&self, adapter: &Self::AdapterId) -> Limits;
-    fn adapter_downlevel_properties(&self, adapter: &Self::AdapterId) -> DownlevelCapabilities;
+    fn adapter_downlevel_capabilities(&self, adapter: &Self::AdapterId) -> DownlevelCapabilities;
     fn adapter_get_info(&self, adapter: &Self::AdapterId) -> AdapterInfo;
     fn adapter_get_texture_format_features(
         &self,
@@ -310,19 +321,25 @@ trait Context: Debug + Send + Sized + Sync {
         desc: &RenderBundleEncoderDescriptor,
     ) -> Self::RenderBundleEncoderId;
     fn device_drop(&self, device: &Self::DeviceId);
-    fn device_poll(&self, device: &Self::DeviceId, maintain: Maintain);
+    fn device_poll(&self, device: &Self::DeviceId, maintain: Maintain) -> bool;
     fn device_on_uncaptured_error(
         &self,
         device: &Self::DeviceId,
         handler: impl UncapturedErrorHandler,
     );
+    fn device_push_error_scope(&self, device: &Self::DeviceId, filter: ErrorFilter);
+    fn device_pop_error_scope(&self, device: &Self::DeviceId) -> Self::PopErrorScopeFuture;
 
     fn buffer_map_async(
         &self,
         buffer: &Self::BufferId,
         mode: MapMode,
         range: Range<BufferAddress>,
-    ) -> Self::MapAsyncFuture;
+        // Note: we keep this as an `impl` through the context because the native backend
+        // needs to wrap it with a wrapping closure. queue_on_submitted_work_done doesn't
+        // need this wrapping closure, so can be made a Box immediately.
+        callback: impl FnOnce(Result<(), BufferAsyncError>) + Send + 'static,
+    );
     fn buffer_get_mapped_range(
         &self,
         buffer: &Self::BufferId,
@@ -484,12 +501,17 @@ trait Context: Debug + Send + Sized + Sync {
         &self,
         queue: &Self::QueueId,
         command_buffers: I,
-    );
+    ) -> Self::SubmissionIndex;
     fn queue_get_timestamp_period(&self, queue: &Self::QueueId) -> f32;
     fn queue_on_submitted_work_done(
         &self,
         queue: &Self::QueueId,
-    ) -> Self::OnSubmittedWorkDoneFuture;
+        // Note: we force the caller to box this because neither backend needs to
+        // wrap the callback and this prevents us from needing to make more functions
+        // generic than we have to. `buffer_map_async` needs to be wrapped on the native
+        // backend, so we don't box until after it has been wrapped.
+        callback: Box<dyn FnOnce() + Send + 'static>,
+    );
 
     fn device_start_capture(&self, device: &Self::DeviceId);
     fn device_stop_capture(&self, device: &Self::DeviceId);
@@ -501,6 +523,8 @@ trait Context: Debug + Send + Sized + Sync {
 /// Its primary use is to create [`Adapter`]s and [`Surface`]s.
 ///
 /// Does not have to be kept alive.
+///
+/// Corresponds to [WebGPU `GPU`](https://gpuweb.github.io/gpuweb/#gpu-interface).
 #[derive(Debug)]
 pub struct Instance {
     context: Arc<C>,
@@ -512,6 +536,8 @@ pub struct Instance {
 /// on the host system by using [`Adapter::request_device`].
 ///
 /// Does not have to be kept alive.
+///
+/// Corresponds to [WebGPU `GPUAdapter`](https://gpuweb.github.io/gpuweb/#gpu-adapter).
 #[derive(Debug)]
 pub struct Adapter {
     context: Arc<C>,
@@ -532,21 +558,19 @@ impl Drop for Adapter {
 /// These are then used in commands, which are submitted to a [`Queue`].
 ///
 /// A device may be requested from an adapter with [`Adapter::request_device`].
+///
+/// Corresponds to [WebGPU `GPUDevice`](https://gpuweb.github.io/gpuweb/#gpu-device).
 #[derive(Debug)]
 pub struct Device {
     context: Arc<C>,
     id: <C as Context>::DeviceId,
 }
 
-/// Passed to [`Device::poll`] to control if it should block or not. This has no effect on
-/// the web.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum Maintain {
-    /// Block
-    Wait,
-    /// Don't block
-    Poll,
-}
+/// Identifier for a particular call to [`Queue::submit`]. Can be used
+/// as part of an argument to [`Device::poll`] to block for a particular
+/// submission to finish.
+#[derive(Debug, Copy, Clone)]
+pub struct SubmissionIndex(<C as Context>::SubmissionIndex);
 
 /// The main purpose of this struct is to resolve mapped ranges (convert sizes
 /// to end points), and to ensure that the sub-ranges don't intersect.
@@ -611,6 +635,8 @@ impl MapContext {
 ///
 /// Created with [`Device::create_buffer`] or
 /// [`DeviceExt::create_buffer_init`](util::DeviceExt::create_buffer_init).
+///
+/// Corresponds to [WebGPU `GPUBuffer`](https://gpuweb.github.io/gpuweb/#buffer-interface).
 #[derive(Debug)]
 pub struct Buffer {
     context: Arc<C>,
@@ -633,7 +659,9 @@ pub struct BufferSlice<'a> {
 
 /// Handle to a texture on the GPU.
 ///
-/// Created by calling [`Device::create_texture`]
+/// It can be created with [`Device::create_texture`].
+///
+/// Corresponds to [WebGPU `GPUTexture`](https://gpuweb.github.io/gpuweb/#texture-interface).
 #[derive(Debug)]
 pub struct Texture {
     context: Arc<C>,
@@ -645,6 +673,8 @@ pub struct Texture {
 ///
 /// A `TextureView` object describes a texture and associated metadata needed by a
 /// [`RenderPipeline`] or [`BindGroup`].
+///
+/// Corresponds to [WebGPU `GPUTextureView`](https://gpuweb.github.io/gpuweb/#gputextureview).
 #[derive(Debug)]
 pub struct TextureView {
     context: Arc<C>,
@@ -656,6 +686,10 @@ pub struct TextureView {
 /// A `Sampler` object defines how a pipeline will sample from a [`TextureView`]. Samplers define
 /// image filters (including anisotropy) and address (wrapping) modes, among other things. See
 /// the documentation for [`SamplerDescriptor`] for more information.
+///
+/// It can be created with [`Device::create_sampler`].
+///
+/// Corresponds to [WebGPU `GPUSampler`](https://gpuweb.github.io/gpuweb/#sampler-interface).
 #[derive(Debug)]
 pub struct Sampler {
     context: Arc<C>,
@@ -694,6 +728,11 @@ impl Drop for Surface {
 /// create a [`BindGroupDescriptor`] object, which in turn can be used to create a [`BindGroup`]
 /// object with [`Device::create_bind_group`]. A series of `BindGroupLayout`s can also be used to
 /// create a [`PipelineLayoutDescriptor`], which can be used to create a [`PipelineLayout`].
+///
+/// It can be created with [`Device::create_bind_group_layout`].
+///
+/// Corresponds to [WebGPU `GPUBindGroupLayout`](
+/// https://gpuweb.github.io/gpuweb/#gpubindgrouplayout).
 #[derive(Debug)]
 pub struct BindGroupLayout {
     context: Arc<C>,
@@ -714,6 +753,8 @@ impl Drop for BindGroupLayout {
 /// [`BindGroupLayout`]. It can be created with [`Device::create_bind_group`]. A `BindGroup` can
 /// be bound to a particular [`RenderPass`] with [`RenderPass::set_bind_group`], or to a
 /// [`ComputePass`] with [`ComputePass::set_bind_group`].
+///
+/// Corresponds to [WebGPU `GPUBindGroup`](https://gpuweb.github.io/gpuweb/#gpubindgroup).
 #[derive(Debug)]
 pub struct BindGroup {
     context: Arc<C>,
@@ -731,8 +772,11 @@ impl Drop for BindGroup {
 /// Handle to a compiled shader module.
 ///
 /// A `ShaderModule` represents a compiled shader module on the GPU. It can be created by passing
-/// valid SPIR-V source code to [`Device::create_shader_module`]. Shader modules are used to define
-/// programmable stages of a pipeline.
+/// source code to [`Device::create_shader_module`] or valid SPIR-V binary to
+/// [`Device::create_shader_module_spirv`]. Shader modules are used to define programmable stages
+/// of a pipeline.
+///
+/// Corresponds to [WebGPU `GPUShaderModule`](https://gpuweb.github.io/gpuweb/#shader-module).
 #[derive(Debug)]
 pub struct ShaderModule {
     context: Arc<C>,
@@ -748,38 +792,40 @@ impl Drop for ShaderModule {
 }
 
 /// Source of a shader module.
+///
+/// The source will be parsed and validated.
+///
+/// Any necessary shader translation (e.g. from WGSL to SPIR-V or vice versa)
+/// will be done internally by wgpu.
+#[non_exhaustive]
 pub enum ShaderSource<'a> {
     /// SPIR-V module represented as a slice of words.
     ///
-    /// wgpu will attempt to parse and validate it, but the original binary
-    /// is passed to `gfx-rs` and `spirv_cross` for translation.
+    /// See also: [`util::make_spirv`], [`include_spirv`]
     #[cfg(feature = "spirv")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "spirv")))]
     SpirV(Cow<'a, [u32]>),
-    /// GSLS module as a string slice.
+    /// GLSL module as a string slice.
     ///
-    /// wgpu will attempt to parse and validate it. The module will get
-    /// passed to wgpu-core where it will translate it to the required languages.
-    ///
-    /// Note: GLSL is not yet fully supported and must be a direct ShaderStage.
+    /// Note: GLSL is not yet fully supported and must be a specific ShaderStage.
     #[cfg(feature = "glsl")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "glsl")))]
     Glsl {
-        /// The shaders code
+        /// The source code of the shader.
         shader: Cow<'a, str>,
-        /// Stage in which the GLSL shader is for example: naga::ShaderStage::Vertex
+        /// The shader stage that the shader targets. For example, `naga::ShaderStage::Vertex`
         stage: naga::ShaderStage,
-        /// Defines to unlock configured shader features
+        /// Defines to unlock configured shader features.
         defines: naga::FastHashMap<String, String>,
     },
     /// WGSL module as a string slice.
-    ///
-    /// wgpu-rs will parse it and use for validation. It will attempt
-    /// to build a SPIR-V module internally and panic otherwise.
-    ///
-    /// Note: WGSL is not yet supported on the Web.
     Wgsl(Cow<'a, str>),
 }
 
-/// Descriptor for a shader module.
+/// Descriptor for use with [`Device::create_shader_module`].
+///
+/// Corresponds to [WebGPU `GPUShaderModuleDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpushadermoduledescriptor).
 pub struct ShaderModuleDescriptor<'a> {
     /// Debug label of the shader module. This will show up in graphics debuggers for easy identification.
     pub label: Label<'a>,
@@ -798,6 +844,9 @@ pub struct ShaderModuleDescriptorSpirV<'a> {
 /// Handle to a pipeline layout.
 ///
 /// A `PipelineLayout` object describes the available binding groups of a pipeline.
+/// It can be created with [`Device::create_pipeline_layout`].
+///
+/// Corresponds to [WebGPU `GPUPipelineLayout`](https://gpuweb.github.io/gpuweb/#gpupipelinelayout).
 #[derive(Debug)]
 pub struct PipelineLayout {
     context: Arc<C>,
@@ -815,7 +864,9 @@ impl Drop for PipelineLayout {
 /// Handle to a rendering (graphics) pipeline.
 ///
 /// A `RenderPipeline` object represents a graphics pipeline and its stages, bindings, vertex
-/// buffers and targets. A `RenderPipeline` may be created with [`Device::create_render_pipeline`].
+/// buffers and targets. It can be created with [`Device::create_render_pipeline`].
+///
+/// Corresponds to [WebGPU `GPURenderPipeline`](https://gpuweb.github.io/gpuweb/#render-pipeline).
 #[derive(Debug)]
 pub struct RenderPipeline {
     context: Arc<C>,
@@ -846,7 +897,9 @@ impl RenderPipeline {
 /// Handle to a compute pipeline.
 ///
 /// A `ComputePipeline` object represents a compute pipeline and its single shader stage.
-/// A `ComputePipeline` may be created with [`Device::create_compute_pipeline`].
+/// It can be created with [`Device::create_compute_pipeline`].
+///
+/// Corresponds to [WebGPU `GPUComputePipeline`](https://gpuweb.github.io/gpuweb/#compute-pipeline).
 #[derive(Debug)]
 pub struct ComputePipeline {
     context: Arc<C>,
@@ -879,6 +932,8 @@ impl ComputePipeline {
 /// A `CommandBuffer` represents a complete sequence of commands that may be submitted to a command
 /// queue with [`Queue::submit`]. A `CommandBuffer` is obtained by recording a series of commands to
 /// a [`CommandEncoder`] and then calling [`CommandEncoder::finish`].
+///
+/// Corresponds to [WebGPU `GPUCommandBuffer`](https://gpuweb.github.io/gpuweb/#command-buffer).
 #[derive(Debug)]
 pub struct CommandBuffer {
     context: Arc<C>,
@@ -902,6 +957,8 @@ impl Drop for CommandBuffer {
 ///
 /// When finished recording, call [`CommandEncoder::finish`] to obtain a [`CommandBuffer`] which may
 /// be submitted for execution.
+///
+/// Corresponds to [WebGPU `GPUCommandEncoder`](https://gpuweb.github.io/gpuweb/#command-encoder).
 #[derive(Debug)]
 pub struct CommandEncoder {
     context: Arc<C>,
@@ -919,6 +976,11 @@ impl Drop for CommandEncoder {
 }
 
 /// In-progress recording of a render pass.
+///
+/// It can be created with [`CommandEncoder::begin_render_pass`].
+///
+/// Corresponds to [WebGPU `GPURenderPassEncoder`](
+/// https://gpuweb.github.io/gpuweb/#render-pass-encoder).
 #[derive(Debug)]
 pub struct RenderPass<'a> {
     id: <C as Context>::RenderPassId,
@@ -926,6 +988,11 @@ pub struct RenderPass<'a> {
 }
 
 /// In-progress recording of a compute pass.
+///
+/// It can be created with [`CommandEncoder::begin_compute_pass`].
+///
+/// Corresponds to [WebGPU `GPUComputePassEncoder`](
+/// https://gpuweb.github.io/gpuweb/#compute-pass-encoder).
 #[derive(Debug)]
 pub struct ComputePass<'a> {
     id: <C as Context>::ComputePassId,
@@ -934,10 +1001,15 @@ pub struct ComputePass<'a> {
 
 /// Encodes a series of GPU operations into a reusable "render bundle".
 ///
-/// It only supports a handful of render commands, but it makes them reusable. [`RenderBundle`]s
-/// can be executed onto a [`CommandEncoder`] using [`RenderPass::execute_bundles`].
+/// It only supports a handful of render commands, but it makes them reusable.
+/// It can be created with [`Device::create_render_bundle_encoder`].
+/// It can be executed onto a [`CommandEncoder`] using [`RenderPass::execute_bundles`].
 ///
-/// Executing a [`RenderBundle`] is often more efficient then issuing the underlying commands manually.
+/// Executing a [`RenderBundle`] is often more efficient than issuing the underlying commands
+/// manually.
+///
+/// Corresponds to [WebGPU `GPURenderBundleEncoder`](
+/// https://gpuweb.github.io/gpuweb/#gpurenderbundleencoder).
 #[derive(Debug)]
 pub struct RenderBundleEncoder<'a> {
     context: Arc<C>,
@@ -950,10 +1022,13 @@ pub struct RenderBundleEncoder<'a> {
 
 /// Pre-prepared reusable bundle of GPU operations.
 ///
-/// It only supports a handful of render commands, but it makes them reusable. [`RenderBundle`]s
-/// can be executed onto a [`CommandEncoder`] using [`RenderPass::execute_bundles`].
+/// It only supports a handful of render commands, but it makes them reusable. Executing a
+/// [`RenderBundle`] is often more efficient than issuing the underlying commands manually.
 ///
-/// Executing a [`RenderBundle`] is often more efficient then issuing the underlying commands manually.
+/// It can be created by use of a [`RenderBundleEncoder`], and executed onto a [`CommandEncoder`]
+/// using [`RenderPass::execute_bundles`].
+///
+/// Corresponds to [WebGPU `GPURenderBundle`](https://gpuweb.github.io/gpuweb/#render-bundle).
 #[derive(Debug)]
 pub struct RenderBundle {
     context: Arc<C>,
@@ -969,6 +1044,10 @@ impl Drop for RenderBundle {
 }
 
 /// Handle to a query set.
+///
+/// It can be created with [`Device::create_query_set`].
+///
+/// Corresponds to [WebGPU `GPUQuerySet`](https://gpuweb.github.io/gpuweb/#queryset).
 pub struct QuerySet {
     context: Arc<C>,
     id: <C as Context>::QuerySetId,
@@ -986,6 +1065,9 @@ impl Drop for QuerySet {
 ///
 /// A `Queue` executes recorded [`CommandBuffer`] objects and provides convenience methods
 /// for writing to [buffers](Queue::write_buffer) and [textures](Queue::write_texture).
+/// It can be created along with a [`Device`] by calling [`Adapter::request_device`].
+///
+/// Corresponds to [WebGPU `GPUQueue`](https://gpuweb.github.io/gpuweb/#gpu-queue).
 #[derive(Debug)]
 pub struct Queue {
     context: Arc<C>,
@@ -993,6 +1075,9 @@ pub struct Queue {
 }
 
 /// Resource that can be bound to a pipeline.
+///
+/// Corresponds to [WebGPU `GPUBindingResource`](
+/// https://gpuweb.github.io/gpuweb/#typedefdef-gpubindingresource).
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum BindingResource<'a> {
@@ -1012,6 +1097,13 @@ pub enum BindingResource<'a> {
     ///
     /// Corresponds to [`wgt::BindingType::Sampler`] with [`BindGroupLayoutEntry::count`] set to None.
     Sampler(&'a Sampler),
+    /// Binding is backed by an array of samplers.
+    ///
+    /// [`Features::TEXTURE_BINDING_ARRAY`] must be supported to use this feature.
+    ///
+    /// Corresponds to [`wgt::BindingType::Sampler`] with [`BindGroupLayoutEntry::count`] set
+    /// to Some.
+    SamplerArray(&'a [&'a Sampler]),
     /// Binding is backed by a texture.
     ///
     /// Corresponds to [`wgt::BindingType::Texture`] and [`wgt::BindingType::StorageTexture`] with
@@ -1027,6 +1119,9 @@ pub enum BindingResource<'a> {
 }
 
 /// Describes the segment of a buffer to bind.
+///
+/// Corresponds to [WebGPU `GPUBufferBinding`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpubufferbinding).
 #[derive(Clone, Debug)]
 pub struct BufferBinding<'a> {
     /// The buffer to bind.
@@ -1044,6 +1139,8 @@ pub struct BufferBinding<'a> {
 /// Operation to perform to the output attachment at the start of a renderpass.
 ///
 /// The render target must be cleared at least once before its content is loaded.
+///
+/// Corresponds to [WebGPU `GPULoadOp`](https://gpuweb.github.io/gpuweb/#enumdef-gpuloadop).
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 #[cfg_attr(feature = "trace", derive(serde::Serialize))]
 #[cfg_attr(feature = "replay", derive(serde::Deserialize))]
@@ -1081,21 +1178,31 @@ impl<V: Default> Default for Operations<V> {
 }
 
 /// Describes a color attachment to a [`RenderPass`].
+///
+/// For use with [`RenderPassDescriptor`].
+///
+/// Corresponds to [WebGPU `GPURenderPassColorAttachment`](
+/// https://gpuweb.github.io/gpuweb/#color-attachments).
 #[derive(Clone, Debug)]
-pub struct RenderPassColorAttachment<'a> {
+pub struct RenderPassColorAttachment<'tex> {
     /// The view to use as an attachment.
-    pub view: &'a TextureView,
+    pub view: &'tex TextureView,
     /// The view that will receive the resolved output if multisampling is used.
-    pub resolve_target: Option<&'a TextureView>,
+    pub resolve_target: Option<&'tex TextureView>,
     /// What operations will be performed on this color attachment.
     pub ops: Operations<Color>,
 }
 
 /// Describes a depth/stencil attachment to a [`RenderPass`].
+///
+/// For use with [`RenderPassDescriptor`].
+///
+/// Corresponds to [WebGPU `GPURenderPassDepthStencilAttachment`](
+/// https://gpuweb.github.io/gpuweb/#depth-stencil-attachments).
 #[derive(Clone, Debug)]
-pub struct RenderPassDepthStencilAttachment<'a> {
+pub struct RenderPassDepthStencilAttachment<'tex> {
     /// The view to use as an attachment.
-    pub view: &'a TextureView,
+    pub view: &'tex TextureView,
     /// What operations will be performed on the depth part of the attachment.
     pub depth_ops: Option<Operations<f32>>,
     /// What operations will be performed on the stencil part of the attachment.
@@ -1104,25 +1211,68 @@ pub struct RenderPassDepthStencilAttachment<'a> {
 
 // The underlying types are also exported so that documentation shows up for them
 
-/// Object label.
+/// Object debugging label.
 pub type Label<'a> = Option<&'a str>;
 pub use wgt::RequestAdapterOptions as RequestAdapterOptionsBase;
 /// Additional information required when requesting an adapter.
+///
+/// For use with [`Instance::request_adapter`].
+///
+/// Corresponds to [WebGPU `GPURequestAdapterOptions`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpurequestadapteroptions).
 pub type RequestAdapterOptions<'a> = RequestAdapterOptionsBase<&'a Surface>;
 /// Describes a [`Device`].
+///
+/// For use with [`Adapter::request_device`].
+///
+/// Corresponds to [WebGPU `GPUDeviceDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpudevicedescriptor).
 pub type DeviceDescriptor<'a> = wgt::DeviceDescriptor<Label<'a>>;
 /// Describes a [`Buffer`].
+///
+/// For use with [`Device::create_buffer`].
+///
+/// Corresponds to [WebGPU `GPUBufferDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpubufferdescriptor).
 pub type BufferDescriptor<'a> = wgt::BufferDescriptor<Label<'a>>;
 /// Describes a [`CommandEncoder`].
+///
+/// For use with [`Device::create_command_encoder`].
+///
+/// Corresponds to [WebGPU `GPUCommandEncoderDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpucommandencoderdescriptor).
 pub type CommandEncoderDescriptor<'a> = wgt::CommandEncoderDescriptor<Label<'a>>;
 /// Describes a [`RenderBundle`].
+///
+/// For use with [`RenderBundleEncoder::finish`].
+///
+/// Corresponds to [WebGPU `GPURenderBundleDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpurenderbundledescriptor).
 pub type RenderBundleDescriptor<'a> = wgt::RenderBundleDescriptor<Label<'a>>;
 /// Describes a [`Texture`].
+///
+/// For use with [`Device::create_texture`].
+///
+/// Corresponds to [WebGPU `GPUTextureDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gputexturedescriptor).
 pub type TextureDescriptor<'a> = wgt::TextureDescriptor<Label<'a>>;
 /// Describes a [`QuerySet`].
+///
+/// For use with [`Device::create_query_set`].
+///
+/// Corresponds to [WebGPU `GPUQuerySetDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpuquerysetdescriptor).
 pub type QuerySetDescriptor<'a> = wgt::QuerySetDescriptor<Label<'a>>;
+pub use wgt::Maintain as MaintainBase;
+/// Passed to [`Device::poll`] to control how and if it should block.
+pub type Maintain = wgt::Maintain<SubmissionIndex>;
 
 /// Describes a [`TextureView`].
+///
+/// For use with [`Texture::create_view`].
+///
+/// Corresponds to [WebGPU `GPUTextureViewDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gputextureviewdescriptor).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextureViewDescriptor<'a> {
     /// Debug label of the texture view. This will show up in graphics debuggers for easy identification.
@@ -1148,9 +1298,12 @@ pub struct TextureViewDescriptor<'a> {
     pub array_layer_count: Option<NonZeroU32>,
 }
 
-/// Describes a pipeline layout.
+/// Describes a [`PipelineLayout`].
 ///
-/// A `PipelineLayoutDescriptor` can be used to create a pipeline layout.
+/// For use with [`Device::create_pipeline_layout`].
+///
+/// Corresponds to [WebGPU `GPUPipelineLayoutDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpupipelinelayoutdescriptor).
 #[derive(Clone, Debug, Default)]
 pub struct PipelineLayoutDescriptor<'a> {
     /// Debug label of the pipeline layout. This will show up in graphics debuggers for easy identification.
@@ -1166,7 +1319,12 @@ pub struct PipelineLayoutDescriptor<'a> {
     pub push_constant_ranges: &'a [PushConstantRange],
 }
 
-/// Describes a [`Sampler`]
+/// Describes a [`Sampler`].
+///
+/// For use with [`Device::create_sampler`].
+///
+/// Corresponds to [WebGPU `GPUSamplerDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpusamplerdescriptor).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SamplerDescriptor<'a> {
     /// Debug label of the sampler. This will show up in graphics debuggers for easy identification.
@@ -1214,7 +1372,11 @@ impl Default for SamplerDescriptor<'_> {
     }
 }
 
-/// Bindable resource and the slot to bind it to.
+/// An element of a [`BindGroupDescriptor`], consisting of a bindable resource
+/// and the slot to bind it to.
+///
+/// Corresponds to [WebGPU `GPUBindGroupEntry`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpubindgroupentry).
 #[derive(Clone, Debug)]
 pub struct BindGroupEntry<'a> {
     /// Slot for which binding provides resource. Corresponds to an entry of the same
@@ -1225,6 +1387,11 @@ pub struct BindGroupEntry<'a> {
 }
 
 /// Describes a group of bindings and the resources to be bound.
+///
+/// For use with [`Device::create_bind_group`].
+///
+/// Corresponds to [WebGPU `GPUBindGroupDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpubindgroupdescriptor).
 #[derive(Clone, Debug)]
 pub struct BindGroupDescriptor<'a> {
     /// Debug label of the bind group. This will show up in graphics debuggers for easy identification.
@@ -1237,19 +1404,29 @@ pub struct BindGroupDescriptor<'a> {
 
 /// Describes the attachments of a render pass.
 ///
-/// Note: separate lifetimes are needed because the texture views
-/// have to live as long as the pass is recorded, while everything else doesn't.
+/// For use with [`CommandEncoder::begin_render_pass`].
+///
+/// Note: separate lifetimes are needed because the texture views (`'tex`)
+/// have to live as long as the pass is recorded, while everything else (`'desc`) doesn't.
+///
+/// Corresponds to [WebGPU `GPURenderPassDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpurenderpassdescriptor).
 #[derive(Clone, Debug, Default)]
-pub struct RenderPassDescriptor<'a, 'b> {
+pub struct RenderPassDescriptor<'tex, 'desc> {
     /// Debug label of the render pass. This will show up in graphics debuggers for easy identification.
-    pub label: Label<'a>,
+    pub label: Label<'desc>,
     /// The color attachments of the render pass.
-    pub color_attachments: &'b [RenderPassColorAttachment<'a>],
+    pub color_attachments: &'desc [RenderPassColorAttachment<'tex>],
     /// The depth and stencil attachment of the render pass, if any.
-    pub depth_stencil_attachment: Option<RenderPassDepthStencilAttachment<'a>>,
+    pub depth_stencil_attachment: Option<RenderPassDepthStencilAttachment<'tex>>,
 }
 
 /// Describes how the vertex buffer is interpreted.
+///
+/// For use in [`VertexState`].
+///
+/// Corresponds to [WebGPU `GPUVertexBufferLayout`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpurenderpassdescriptor).
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct VertexBufferLayout<'a> {
     /// The stride, in bytes, between elements of this buffer.
@@ -1260,7 +1437,12 @@ pub struct VertexBufferLayout<'a> {
     pub attributes: &'a [VertexAttribute],
 }
 
-/// Describes the vertex process in a render pipeline.
+/// Describes the vertex processing in a render pipeline.
+///
+/// For use in [`RenderPipelineDescriptor`].
+///
+/// Corresponds to [WebGPU `GPUVertexState`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpuvertexstate).
 #[derive(Clone, Debug)]
 pub struct VertexState<'a> {
     /// The compiled shader module for this stage.
@@ -1272,7 +1454,12 @@ pub struct VertexState<'a> {
     pub buffers: &'a [VertexBufferLayout<'a>],
 }
 
-/// Describes the fragment process in a render pipeline.
+/// Describes the fragment processing in a render pipeline.
+///
+/// For use in [`RenderPipelineDescriptor`].
+///
+/// Corresponds to [WebGPU `GPUFragmentState`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpufragmentstate).
 #[derive(Clone, Debug)]
 pub struct FragmentState<'a> {
     /// The compiled shader module for this stage.
@@ -1285,6 +1472,11 @@ pub struct FragmentState<'a> {
 }
 
 /// Describes a render (graphics) pipeline.
+///
+/// For use with [`Device::create_render_pipeline`].
+///
+/// Corresponds to [WebGPU `GPURenderPipelineDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpurenderpipelinedescriptor).
 #[derive(Clone, Debug)]
 pub struct RenderPipelineDescriptor<'a> {
     /// Debug label of the pipeline. This will show up in graphics debuggers for easy identification.
@@ -1301,9 +1493,17 @@ pub struct RenderPipelineDescriptor<'a> {
     pub multisample: MultisampleState,
     /// The compiled fragment stage, its entry point, and the color targets.
     pub fragment: Option<FragmentState<'a>>,
+    /// If the pipeline will be used with a multiview render pass, this indicates how many array
+    /// layers the attachments will have.
+    pub multiview: Option<NonZeroU32>,
 }
 
 /// Describes the attachments of a compute pass.
+///
+/// For use with [`CommandEncoder::begin_compute_pass`].
+///
+/// Corresponds to [WebGPU `GPUComputePassDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpucomputepassdescriptor).
 #[derive(Clone, Debug, Default)]
 pub struct ComputePassDescriptor<'a> {
     /// Debug label of the compute pass. This will show up in graphics debuggers for easy identification.
@@ -1311,6 +1511,11 @@ pub struct ComputePassDescriptor<'a> {
 }
 
 /// Describes a compute pipeline.
+///
+/// For use with [`Device::create_compute_pipeline`].
+///
+/// Corresponds to [WebGPU `GPUComputePipelineDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpucomputepipelinedescriptor).
 #[derive(Clone, Debug)]
 pub struct ComputePipelineDescriptor<'a> {
     /// Debug label of the pipeline. This will show up in graphics debuggers for easy identification.
@@ -1326,13 +1531,24 @@ pub struct ComputePipelineDescriptor<'a> {
 
 pub use wgt::ImageCopyBuffer as ImageCopyBufferBase;
 /// View of a buffer which can be used to copy to/from a texture.
+///
+/// Corresponds to [WebGPU `GPUImageCopyBuffer`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpuimagecopybuffer).
 pub type ImageCopyBuffer<'a> = ImageCopyBufferBase<&'a Buffer>;
 
 pub use wgt::ImageCopyTexture as ImageCopyTextureBase;
 /// View of a texture which can be used to copy to/from a buffer/texture.
+///
+/// Corresponds to [WebGPU `GPUImageCopyTexture`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpuimagecopytexture).
 pub type ImageCopyTexture<'a> = ImageCopyTextureBase<&'a Texture>;
 
 /// Describes a [`BindGroupLayout`].
+///
+/// For use with [`Device::create_bind_group_layout`].
+///
+/// Corresponds to [WebGPU `GPUBindGroupLayoutDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpubindgrouplayoutdescriptor).
 #[derive(Clone, Debug)]
 pub struct BindGroupLayoutDescriptor<'a> {
     /// Debug label of the bind group layout. This will show up in graphics debuggers for easy identification.
@@ -1343,6 +1559,11 @@ pub struct BindGroupLayoutDescriptor<'a> {
 }
 
 /// Describes a [`RenderBundleEncoder`].
+///
+/// For use with [`Device::create_render_bundle_encoder`].
+///
+/// Corresponds to [WebGPU `GPURenderBundleEncoderDescriptor`](
+/// https://gpuweb.github.io/gpuweb/#dictdef-gpurenderbundleencoderdescriptor).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct RenderBundleEncoderDescriptor<'a> {
     /// Debug label of the render bundle encoder. This will show up in graphics debuggers for easy identification.
@@ -1356,6 +1577,8 @@ pub struct RenderBundleEncoderDescriptor<'a> {
     /// Sample count this render bundle is capable of rendering to. This must match the pipelines and
     /// the renderpasses it is used in.
     pub sample_count: u32,
+    /// If this render bundle will rendering to multiple array layers in the attachments at the same time.
+    pub multiview: Option<NonZeroU32>,
 }
 
 /// Surface texture that can be rendered to.
@@ -1419,11 +1642,26 @@ impl Instance {
     /// # Safety
     ///
     /// Refer to the creation of wgpu-hal Instance for every backend.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub unsafe fn from_hal<A: wgc::hub::HalApi>(hal_instance: A::Instance) -> Self {
         Self {
             context: Arc::new(C::from_hal_instance::<A>(hal_instance)),
         }
+    }
+
+    /// Returns the inner hal Instance using a callback. The hal instance will be `None` if the
+    /// backend type argument does not match with this wgpu Instance
+    ///
+    /// # Safety
+    ///
+    /// - The raw handle obtained from the hal Instance must not be manually destroyed
+    #[cfg(any(not(target_arch = "wasm32"), feature = "webgl2"))]
+    pub unsafe fn as_hal<A: wgc::hub::HalApi, F: FnOnce(Option<&A::Instance>) -> R, R>(
+        &self,
+        hal_instance_callback: F,
+    ) -> R {
+        self.context
+            .instance_as_hal::<A, F, R>(hal_instance_callback)
     }
 
     /// Retrieves all available [`Adapter`]s that match the given [`Backends`].
@@ -1431,7 +1669,7 @@ impl Instance {
     /// # Arguments
     ///
     /// - `backends` - Backends from which to enumerate adapters.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub fn enumerate_adapters(&self, backends: Backends) -> impl Iterator<Item = Adapter> {
         let context = Arc::clone(&self.context);
         self.context
@@ -1462,7 +1700,7 @@ impl Instance {
     /// # Safety
     ///
     /// `hal_adapter` must be created from this instance internal handle.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub unsafe fn create_adapter_from_hal<A: wgc::hub::HalApi>(
         &self,
         hal_adapter: hal::ExposedAdapter<A>,
@@ -1478,6 +1716,7 @@ impl Instance {
     ///
     /// - Raw Window Handle must be a valid object to create a surface upon and
     ///   must remain valid for the lifetime of the returned surface.
+    /// - If not called on the main thread, metal backend will panic.
     pub unsafe fn create_surface<W: raw_window_handle::HasRawWindowHandle>(
         &self,
         window: &W,
@@ -1501,16 +1740,23 @@ impl Instance {
         self.context.create_surface_from_core_animation_layer(layer)
     }
 
+    /// Creates a surface from `IDCompositionVisual`.
+    ///
+    /// # Safety
+    ///
+    /// - visual must be a valid IDCompositionVisual to create a surface upon.
+    #[cfg(target_os = "windows")]
+    pub unsafe fn create_surface_from_visual(&self, visual: *mut std::ffi::c_void) -> Surface {
+        self.context.create_surface_from_visual(visual)
+    }
+
     /// Creates a surface from a `web_sys::HtmlCanvasElement`.
     ///
     /// # Safety
     ///
     /// - canvas must be a valid <canvas> element to create a surface upon.
-    #[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
-    pub unsafe fn create_surface_from_canvas(
-        &self,
-        canvas: &web_sys::HtmlCanvasElement,
-    ) -> Surface {
+    #[cfg(all(target_arch = "wasm32", not(feature = "emscripten")))]
+    pub fn create_surface_from_canvas(&self, canvas: &web_sys::HtmlCanvasElement) -> Surface {
         Surface {
             context: Arc::clone(&self.context),
             id: self.context.instance_create_surface_from_canvas(canvas),
@@ -1522,8 +1768,8 @@ impl Instance {
     /// # Safety
     ///
     /// - canvas must be a valid OffscreenCanvas to create a surface upon.
-    #[cfg(all(target_arch = "wasm32", not(feature = "webgl")))]
-    pub unsafe fn create_surface_from_offscreen_canvas(
+    #[cfg(all(target_arch = "wasm32", not(feature = "emscripten")))]
+    pub fn create_surface_from_offscreen_canvas(
         &self,
         canvas: &web_sys::OffscreenCanvas,
     ) -> Surface {
@@ -1536,14 +1782,27 @@ impl Instance {
     }
 
     /// Polls all devices.
-    /// If `force_wait` is true and this is not running on the web,
-    /// then this function will block until all in-flight buffers have been mapped.
-    pub fn poll_all(&self, force_wait: bool) {
-        self.context.instance_poll_all_devices(force_wait);
+    ///
+    /// If `force_wait` is true and this is not running on the web, then this
+    /// function will block until all in-flight buffers have been mapped and
+    /// all submitted commands have finished execution.
+    ///
+    /// Return `true` if all devices' queues are empty, or `false` if there are
+    /// queue submissions still in flight. (Note that, unless access to all
+    /// [`Queue`s] associated with this [`Instance`] is coordinated somehow,
+    /// this information could be out of date by the time the caller receives
+    /// it. `Queue`s can be shared between threads, and other threads could
+    /// submit new work at any time.)
+    ///
+    /// On the web, this is a no-op. `Device`s are automatically polled.
+    ///
+    /// [`Queue`s]: Queue
+    pub fn poll_all(&self, force_wait: bool) -> bool {
+        self.context.instance_poll_all_devices(force_wait)
     }
 
     /// Generates memory report.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub fn generate_report(&self) -> wgc::hub::GlobalReport {
         self.context.generate_report()
     }
@@ -1595,7 +1854,7 @@ impl Adapter {
     ///
     /// - `hal_device` must be created from this adapter internal handle.
     /// - `desc.features` must be a subset of `hal_device` features.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub unsafe fn create_device_from_hal<A: wgc::hub::HalApi>(
         &self,
         hal_device: hal::OpenDevice<A>,
@@ -1617,6 +1876,21 @@ impl Adapter {
                     },
                 )
             })
+    }
+
+    /// Returns the inner hal Adapter using a callback. The hal adapter will be `None` if the
+    /// backend type argument does not match with this wgpu Adapter
+    ///
+    /// # Safety
+    ///
+    /// - The raw handle obtained from the hal Adapter must not be manually destroyed
+    #[cfg(any(not(target_arch = "wasm32"), feature = "webgl2"))]
+    pub unsafe fn as_hal<A: wgc::hub::HalApi, F: FnOnce(Option<&A::Adapter>) -> R, R>(
+        &self,
+        hal_adapter_callback: F,
+    ) -> R {
+        self.context
+            .adapter_as_hal::<A, F, R>(self.id, hal_adapter_callback)
     }
 
     /// Returns whether this adapter may present to the passed surface.
@@ -1646,8 +1920,8 @@ impl Adapter {
     }
 
     /// Get info about the adapter itself.
-    pub fn get_downlevel_properties(&self) -> DownlevelCapabilities {
-        Context::adapter_downlevel_properties(&*self.context, &self.id)
+    pub fn get_downlevel_capabilities(&self) -> DownlevelCapabilities {
+        Context::adapter_downlevel_capabilities(&*self.context, &self.id)
     }
 
     /// Returns the features supported for a given texture format by this adapter.
@@ -1662,9 +1936,15 @@ impl Adapter {
 impl Device {
     /// Check for resource cleanups and mapping callbacks.
     ///
-    /// no-op on the web, device is automatically polled.
-    pub fn poll(&self, maintain: Maintain) {
-        Context::device_poll(&*self.context, &self.id, maintain);
+    /// Return `true` if the queue is empty, or `false` if there are more queue
+    /// submissions still in flight. (Note that, unless access to the [`Queue`] is
+    /// coordinated somehow, this information could be out of date by the time
+    /// the caller receives it. `Queue`s can be shared between threads, so
+    /// other threads could submit new work at any time.)
+    ///
+    /// On the web, this is a no-op. `Device`s are automatically polled.
+    pub fn poll(&self, maintain: Maintain) -> bool {
+        Context::device_poll(&*self.context, &self.id, maintain)
     }
 
     /// List all features that may be used with this device.
@@ -1833,7 +2113,8 @@ impl Device {
     ///
     /// - `hal_texture` must be created from this device internal handle
     /// - `hal_texture` must be created respecting `desc`
-    #[cfg(not(target_arch = "wasm32"))]
+    /// - `hal_texture` must be initialized
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub unsafe fn create_texture_from_hal<A: wgc::hub::HalApi>(
         &self,
         hal_texture: A::Texture,
@@ -1871,6 +2152,16 @@ impl Device {
         self.context.device_on_uncaptured_error(&self.id, handler);
     }
 
+    /// Push an error scope.
+    pub fn push_error_scope(&self, filter: ErrorFilter) {
+        self.context.device_push_error_scope(&self.id, filter);
+    }
+
+    /// Pop an error scope.
+    pub fn pop_error_scope(&self) -> impl Future<Output = Option<Error>> + Send {
+        self.context.device_pop_error_scope(&self.id)
+    }
+
     /// Starts frame capture.
     pub fn start_capture(&self) {
         Context::device_start_capture(&*self.context, &self.id)
@@ -1879,6 +2170,21 @@ impl Device {
     /// Stops frame capture.
     pub fn stop_capture(&self) {
         Context::device_stop_capture(&*self.context, &self.id)
+    }
+
+    /// Returns the inner hal Device using a callback. The hal device will be `None` if the
+    /// backend type argument does not match with this wgpu Device
+    ///
+    /// # Safety
+    ///
+    /// - The raw handle obtained from the hal Device must not be manually destroyed
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
+    pub unsafe fn as_hal<A: wgc::hub::HalApi, F: FnOnce(Option<&A::Device>) -> R, R>(
+        &self,
+        hal_device_callback: F,
+    ) -> R {
+        self.context
+            .device_as_hal::<A, F, R>(&self.id, hal_device_callback)
     }
 }
 
@@ -2086,20 +2392,20 @@ impl Buffer {
 }
 
 impl<'a> BufferSlice<'a> {
-    //TODO: fn slice(&self) -> Self
-
-    /// Map the buffer. Buffer is ready to map once the future is resolved.
+    /// Map the buffer. Buffer is ready to map once the callback is called.
     ///
-    /// For the future to complete, `device.poll(...)` must be called elsewhere in the runtime, possibly integrated
-    /// into an event loop, run on a separate thread, or continually polled in the same task runtime that this
-    /// future will be run on.
+    /// For the callback to complete, either `queue.submit(..)`, `instance.poll_all(..)`, or `device.poll(..)`
+    /// must be called elsewhere in the runtime, possibly integrated into an event loop or run on a separate thread.
     ///
-    /// It's expected that wgpu will eventually supply its own event loop infrastructure that will be easy to integrate
-    /// into other event loops, like winit's.
+    /// The callback will be called on the thread that first calls the above functions after the gpu work
+    /// has completed. There are no restrictions on the code you can run in the callback, however on native the
+    /// call to the function will not complete until the callback returns, so prefer keeping callbacks short
+    /// and used to set flags, send messages, etc.
     pub fn map_async(
         &self,
         mode: MapMode,
-    ) -> impl Future<Output = Result<(), BufferAsyncError>> + Send {
+        callback: impl FnOnce(Result<(), BufferAsyncError>) + Send + 'static,
+    ) {
         let mut mc = self.buffer.map_context.lock();
         assert_eq!(
             mc.initial_range,
@@ -2118,6 +2424,7 @@ impl<'a> BufferSlice<'a> {
             &self.buffer.id,
             mode,
             self.offset..end,
+            callback,
         )
     }
 
@@ -2165,7 +2472,7 @@ impl Texture {
     /// # Safety
     ///
     /// - The raw handle obtained from the hal Texture must not be manually destroyed
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub unsafe fn as_hal<A: wgc::hub::HalApi, F: FnOnce(Option<&A::Texture>)>(
         &self,
         hal_texture_callback: F,
@@ -2229,10 +2536,10 @@ impl CommandEncoder {
     /// Begins recording of a render pass.
     ///
     /// This function returns a [`RenderPass`] object which records a single render pass.
-    pub fn begin_render_pass<'a>(
-        &'a mut self,
-        desc: &RenderPassDescriptor<'a, '_>,
-    ) -> RenderPass<'a> {
+    pub fn begin_render_pass<'pass>(
+        &'pass mut self,
+        desc: &RenderPassDescriptor<'pass, '_>,
+    ) -> RenderPass<'pass> {
         let id = self.id.as_ref().unwrap();
         RenderPass {
             id: Context::command_encoder_begin_render_pass(&*self.context, id, desc),
@@ -2345,12 +2652,16 @@ impl CommandEncoder {
 
     /// Clears texture to zero.
     ///
-    /// Where possible it may be significantly more efficient to perform clears via render passes!
+    /// Note that unlike with clear_buffer, `COPY_DST` usage is not required.
+    ///
+    /// # Implementation notes
+    ///
+    /// - implemented either via buffer copies and render/depth target clear, path depends on texture usages
+    /// - behaves like texture zero init, but is performed immediately (clearing is *not* delayed via marking it as uninitialized)
     ///
     /// # Panics
     ///
-    /// - `CLEAR_COMMANDS` extension not enabled
-    /// - Texture does not have `COPY_DST` usage.
+    /// - `CLEAR_TEXTURE` extension not enabled
     /// - Range is out of bounds
     pub fn clear_texture(&mut self, texture: &Texture, subresource_range: &ImageSubresourceRange) {
         Context::command_encoder_clear_texture(
@@ -2365,7 +2676,6 @@ impl CommandEncoder {
     ///
     /// # Panics
     ///
-    /// - `CLEAR_COMMANDS` extension not enabled
     /// - Buffer does not have `COPY_DST` usage.
     /// - Range it out of bounds
     pub fn clear_buffer(
@@ -2472,7 +2782,7 @@ impl<'a> RenderPass<'a> {
     /// Sets the active bind group for a given bind group index. The bind group layout
     /// in the active pipeline when any `draw()` function is called must match the layout of this bind group.
     ///
-    /// If the bind group have dynamic offsets, provide them in order of their declaration.
+    /// If the bind group have dynamic offsets, provide them in binding order.
     /// These offsets have to be aligned to [`Limits::min_uniform_buffer_offset_alignment`]
     /// or [`Limits::min_storage_buffer_offset_alignment`] appropriately.
     pub fn set_bind_group(
@@ -2587,17 +2897,7 @@ impl<'a> RenderPass<'a> {
     ///
     /// The active vertex buffers can be set with [`RenderPass::set_vertex_buffer`].
     ///
-    /// The structure expected in `indirect_buffer` is the following:
-    ///
-    /// ```rust
-    /// #[repr(C)]
-    /// struct DrawIndirect {
-    ///     vertex_count: u32, // The number of vertices to draw.
-    ///     instance_count: u32, // The number of instances to draw.
-    ///     base_vertex: u32, // The Index of the first vertex to draw.
-    ///     base_instance: u32, // The instance ID of the first instance to draw.
-    /// }
-    /// ```
+    /// The structure expected in `indirect_buffer` must conform to [`DrawIndirect`](crate::util::DrawIndirect).
     pub fn draw_indirect(&mut self, indirect_buffer: &'a Buffer, indirect_offset: BufferAddress) {
         self.id.draw_indirect(&indirect_buffer.id, indirect_offset);
     }
@@ -2608,18 +2908,7 @@ impl<'a> RenderPass<'a> {
     /// The active index buffer can be set with [`RenderPass::set_index_buffer`], while the active
     /// vertex buffers can be set with [`RenderPass::set_vertex_buffer`].
     ///
-    /// The structure expected in `indirect_buffer` is the following:
-    ///
-    /// ```rust
-    /// #[repr(C)]
-    /// struct DrawIndexedIndirect {
-    ///     vertex_count: u32, // The number of vertices to draw.
-    ///     instance_count: u32, // The number of instances to draw.
-    ///     base_index: u32, // The base index within the index buffer.
-    ///     vertex_offset: i32, // The value added to the vertex index before indexing into the vertex buffer.
-    ///     base_instance: u32, // The instance ID of the first instance to draw.
-    /// }
-    /// ```
+    /// The structure expected in `indirect_buffer` must conform to [`DrawIndexedIndirect`](crate::util::DrawIndexedIndirect).
     pub fn draw_indexed_indirect(
         &mut self,
         indirect_buffer: &'a Buffer,
@@ -2631,7 +2920,7 @@ impl<'a> RenderPass<'a> {
 
     /// Execute a [render bundle][RenderBundle], which is a set of pre-recorded commands
     /// that can be run together.
-    pub fn execute_bundles<I: Iterator<Item = &'a RenderBundle>>(&mut self, render_bundles: I) {
+    pub fn execute_bundles<I: IntoIterator<Item = &'a RenderBundle>>(&mut self, render_bundles: I) {
         self.id
             .execute_bundles(render_bundles.into_iter().map(|rb| &rb.id))
     }
@@ -2644,17 +2933,7 @@ impl<'a> RenderPass<'a> {
     ///
     /// The active vertex buffers can be set with [`RenderPass::set_vertex_buffer`].
     ///
-    /// The structure expected in `indirect_buffer` is the following:
-    ///
-    /// ```rust
-    /// #[repr(C)]
-    /// struct DrawIndirect {
-    ///     vertex_count: u32, // The number of vertices to draw.
-    ///     instance_count: u32, // The number of instances to draw.
-    ///     base_vertex: u32, // The Index of the first vertex to draw.
-    ///     base_instance: u32, // The instance ID of the first instance to draw.
-    /// }
-    /// ```
+    /// The structure expected in `indirect_buffer` must conform to [`DrawIndirect`](crate::util::DrawIndirect).
     ///
     /// These draw structures are expected to be tightly packed.
     pub fn multi_draw_indirect(
@@ -2673,18 +2952,7 @@ impl<'a> RenderPass<'a> {
     /// The active index buffer can be set with [`RenderPass::set_index_buffer`], while the active
     /// vertex buffers can be set with [`RenderPass::set_vertex_buffer`].
     ///
-    /// The structure expected in `indirect_buffer` is the following:
-    ///
-    /// ```rust
-    /// #[repr(C)]
-    /// struct DrawIndexedIndirect {
-    ///     vertex_count: u32, // The number of vertices to draw.
-    ///     instance_count: u32, // The number of instances to draw.
-    ///     base_index: u32, // The base index within the index buffer.
-    ///     vertex_offset: i32, // The value added to the vertex index before indexing into the vertex buffer.
-    ///     base_instance: u32, // The instance ID of the first instance to draw.
-    /// }
-    /// ```
+    /// The structure expected in `indirect_buffer` must conform to [`DrawIndexedIndirect`](crate::util::DrawIndexedIndirect).
     ///
     /// These draw structures are expected to be tightly packed.
     pub fn multi_draw_indexed_indirect(
@@ -2708,17 +2976,7 @@ impl<'a> RenderPass<'a> {
     ///
     /// The active vertex buffers can be set with [`RenderPass::set_vertex_buffer`].
     ///
-    /// The structure expected in `indirect_buffer` is the following:
-    ///
-    /// ```rust
-    /// #[repr(C)]
-    /// struct DrawIndirect {
-    ///     vertex_count: u32, // The number of vertices to draw.
-    ///     instance_count: u32, // The number of instances to draw.
-    ///     base_vertex: u32, // The Index of the first vertex to draw.
-    ///     base_instance: u32, // The instance ID of the first instance to draw.
-    /// }
-    /// ```
+    /// The structure expected in `indirect_buffer` must conform to [`DrawIndirect`](crate::util::DrawIndirect).
     ///
     /// These draw structures are expected to be tightly packed.
     ///
@@ -2756,18 +3014,8 @@ impl<'a> RenderPass<'a> {
     /// The active index buffer can be set with [`RenderPass::set_index_buffer`], while the active
     /// vertex buffers can be set with [`RenderPass::set_vertex_buffer`].
     ///
-    /// The structure expected in `indirect_buffer` is the following:
     ///
-    /// ```rust
-    /// #[repr(C)]
-    /// struct DrawIndexedIndirect {
-    ///     vertex_count: u32, // The number of vertices to draw.
-    ///     instance_count: u32, // The number of instances to draw.
-    ///     base_index: u32, // The base index within the index buffer.
-    ///     vertex_offset: i32, // The value added to the vertex index before indexing into the vertex buffer.
-    ///     base_instance: u32, // The instance ID of the first instance to draw.
-    /// }
-    /// ```
+    /// The structure expected in `indirect_buffer` must conform to [`DrawIndexedIndirect`](crate::util::DrawIndexedIndirect).
     ///
     /// These draw structures are expected to be tightly packed.
     ///
@@ -2799,34 +3047,46 @@ impl<'a> RenderPass<'a> {
 
 /// [`Features::PUSH_CONSTANTS`] must be enabled on the device in order to call these functions.
 impl<'a> RenderPass<'a> {
-    /// Set push constant data.
+    /// Set push constant data for subsequent draw calls.
     ///
-    /// Offset is measured in bytes, but must be a multiple of [`PUSH_CONSTANT_ALIGNMENT`].
+    /// Write the bytes in `data` at offset `offset` within push constant
+    /// storage, all of which are accessible by all the pipeline stages in
+    /// `stages`, and no others.  Both `offset` and the length of `data` must be
+    /// multiples of [`PUSH_CONSTANT_ALIGNMENT`], which is always 4.
     ///
-    /// Data size must be a multiple of 4 and must be aligned to the 4s, so we take an array of u32.
-    /// For example, with an offset of 4 and an array of `[u32; 3]`, that will write to the range
-    /// of 4..16.
+    /// For example, if `offset` is `4` and `data` is eight bytes long, this
+    /// call will write `data` to bytes `4..12` of push constant storage.
     ///
-    /// For each byte in the range of push constant data written, the union of the stages of all push constant
-    /// ranges that covers that byte must be exactly `stages`. There's no good way of explaining this simply,
-    /// so here are some examples:
+    /// # Stage matching
     ///
-    /// ```text
-    /// For the given ranges:
-    /// - 0..4 Vertex
-    /// - 4..8 Fragment
-    /// ```
+    /// Every byte in the affected range of push constant storage must be
+    /// accessible to exactly the same set of pipeline stages, which must match
+    /// `stages`. If there are two bytes of storage that are accessible by
+    /// different sets of pipeline stages - say, one is accessible by fragment
+    /// shaders, and the other is accessible by both fragment shaders and vertex
+    /// shaders - then no single `set_push_constants` call may affect both of
+    /// them; to write both, you must make multiple calls, each with the
+    /// appropriate `stages` value.
     ///
-    /// You would need to upload this in two set_push_constants calls. First for the `Vertex` range, second for the `Fragment` range.
+    /// Which pipeline stages may access a given byte is determined by the
+    /// pipeline's [`PushConstant`] global variable and (if it is a struct) its
+    /// members' offsets.
     ///
-    /// ```text
-    /// For the given ranges:
-    /// - 0..8  Vertex
-    /// - 4..12 Fragment
-    /// ```
+    /// For example, suppose you have twelve bytes of push constant storage,
+    /// where bytes `0..8` are accessed by the vertex shader, and bytes `4..12`
+    /// are accessed by the fragment shader. This means there are three byte
+    /// ranges each accessed by a different set of stages:
     ///
-    /// You would need to upload this in three set_push_constants calls. First for the `Vertex` only range 0..4, second
-    /// for the `Vertex | Fragment` range 4..8, third for the `Fragment` range 8..12.
+    /// - Bytes `0..4` are accessed only by the fragment shader.
+    ///
+    /// - Bytes `4..8` are accessed by both the fragment shader and the vertex shader.
+    ///
+    /// - Bytes `8..12 are accessed only by the vertex shader.
+    ///
+    /// To write all twelve bytes requires three `set_push_constants` calls, one
+    /// for each range, each passing the matching `stages` mask.
+    ///
+    /// [`PushConstant`]: https://docs.rs/naga/latest/naga/enum.StorageClass.html#variant.PushConstant
     pub fn set_push_constants(&mut self, stages: ShaderStages, offset: u32, data: &[u8]) {
         self.id.set_push_constants(stages, offset, data);
     }
@@ -2877,7 +3137,7 @@ impl<'a> ComputePass<'a> {
     /// Sets the active bind group for a given bind group index. The bind group layout
     /// in the active pipeline when the `dispatch()` function is called must match the layout of this bind group.
     ///
-    /// If the bind group have dynamic offsets, provide them in order of their declaration.
+    /// If the bind group have dynamic offsets, provide them in the binding order.
     /// These offsets have to be aligned to [`Limits::min_uniform_buffer_offset_alignment`]
     /// or [`Limits::min_storage_buffer_offset_alignment`] appropriately.
     pub fn set_bind_group(
@@ -2912,41 +3172,36 @@ impl<'a> ComputePass<'a> {
     /// Dispatches compute work operations.
     ///
     /// `x`, `y` and `z` denote the number of work groups to dispatch in each dimension.
-    pub fn dispatch(&mut self, x: u32, y: u32, z: u32) {
-        ComputePassInner::dispatch(&mut self.id, x, y, z);
+    pub fn dispatch_workgroups(&mut self, x: u32, y: u32, z: u32) {
+        ComputePassInner::dispatch_workgroups(&mut self.id, x, y, z);
     }
 
     /// Dispatches compute work operations, based on the contents of the `indirect_buffer`.
     ///
-    /// The structure expected in `indirect_buffer` is the following:
-    ///
-    /// ```rust
-    /// // x, y and z denote the number of work groups to dispatch in each dimension.
-    /// #[repr(C)]
-    /// struct DispatchIndirect {
-    ///     x: u32,
-    ///     y: u32,
-    ///     z: u32,
-    /// }
-    /// ```
-    pub fn dispatch_indirect(
+    /// The structure expected in `indirect_buffer` must conform to [`DispatchIndirect`](crate::util::DispatchIndirect).
+    pub fn dispatch_workgroups_indirect(
         &mut self,
         indirect_buffer: &'a Buffer,
         indirect_offset: BufferAddress,
     ) {
-        ComputePassInner::dispatch_indirect(&mut self.id, &indirect_buffer.id, indirect_offset);
+        ComputePassInner::dispatch_workgroups_indirect(
+            &mut self.id,
+            &indirect_buffer.id,
+            indirect_offset,
+        );
     }
 }
 
 /// [`Features::PUSH_CONSTANTS`] must be enabled on the device in order to call these functions.
 impl<'a> ComputePass<'a> {
-    /// Set push constant data.
+    /// Set push constant data for subsequent dispatch calls.
     ///
-    /// Offset is measured in bytes, but must be a multiple of [`PUSH_CONSTANT_ALIGNMENT`].
+    /// Write the bytes in `data` at offset `offset` within push constant
+    /// storage.  Both `offset` and the length of `data` must be
+    /// multiples of [`PUSH_CONSTANT_ALIGNMENT`], which is always 4.
     ///
-    /// Data size must be a multiple of 4 and must be aligned to the 4s, so we take an array of u32.
-    /// For example, with an offset of 4 and an array of `[u32; 3]`, that will write to the range
-    /// of 4..16.
+    /// For example, if `offset` is `4` and `data` is eight bytes long, this
+    /// call will write `data` to bytes `4..12` of push constant storage.
     pub fn set_push_constants(&mut self, offset: u32, data: &[u8]) {
         self.id.set_push_constants(offset, data);
     }
@@ -3004,7 +3259,7 @@ impl<'a> RenderBundleEncoder<'a> {
     /// Sets the active bind group for a given bind group index. The bind group layout
     /// in the active pipeline when any `draw()` function is called must match the layout of this bind group.
     ///
-    /// If the bind group have dynamic offsets, provide them in order of their declaration.
+    /// If the bind group have dynamic offsets, provide them in the binding order.
     pub fn set_bind_group(
         &mut self,
         index: u32,
@@ -3074,17 +3329,7 @@ impl<'a> RenderBundleEncoder<'a> {
     ///
     /// The active vertex buffers can be set with [`RenderBundleEncoder::set_vertex_buffer`].
     ///
-    /// The structure expected in `indirect_buffer` is the following:
-    ///
-    /// ```rust
-    /// #[repr(C)]
-    /// struct DrawIndirect {
-    ///     vertex_count: u32, // The number of vertices to draw.
-    ///     instance_count: u32, // The number of instances to draw.
-    ///     base_vertex: u32, // The Index of the first vertex to draw.
-    ///     base_instance: u32, // The instance ID of the first instance to draw.
-    /// }
-    /// ```
+    /// The structure expected in `indirect_buffer` must conform to [`DrawIndirect`](crate::util::DrawIndirect).
     pub fn draw_indirect(&mut self, indirect_buffer: &'a Buffer, indirect_offset: BufferAddress) {
         self.id.draw_indirect(&indirect_buffer.id, indirect_offset);
     }
@@ -3095,18 +3340,7 @@ impl<'a> RenderBundleEncoder<'a> {
     /// The active index buffer can be set with [`RenderBundleEncoder::set_index_buffer`], while the active
     /// vertex buffers can be set with [`RenderBundleEncoder::set_vertex_buffer`].
     ///
-    /// The structure expected in `indirect_buffer` is the following:
-    ///
-    /// ```rust
-    /// #[repr(C)]
-    /// struct DrawIndexedIndirect {
-    ///     vertex_count: u32, // The number of vertices to draw.
-    ///     instance_count: u32, // The number of instances to draw.
-    ///     base_index: u32, // The base index within the index buffer.
-    ///     vertex_offset: i32, // The value added to the vertex index before indexing into the vertex buffer.
-    ///     base_instance: u32, // The instance ID of the first instance to draw.
-    /// }
-    /// ```
+    /// The structure expected in `indirect_buffer` must conform to [`DrawIndexedIndirect`](crate::util::DrawIndexedIndirect).
     pub fn draw_indexed_indirect(
         &mut self,
         indirect_buffer: &'a Buffer,
@@ -3123,9 +3357,9 @@ impl<'a> RenderBundleEncoder<'a> {
     ///
     /// Offset is measured in bytes, but must be a multiple of [`PUSH_CONSTANT_ALIGNMENT`].
     ///
-    /// Data size must be a multiple of 4 and must be aligned to the 4s, so we take an array of u32.
-    /// For example, with an offset of 4 and an array of `[u32; 3]`, that will write to the range
-    /// of 4..16.
+    /// Data size must be a multiple of 4 and must have an alignment of 4.
+    /// For example, with an offset of 4 and an array of `[u8; 8]`, that will write to the range
+    /// of 4..12.
     ///
     /// For each byte in the range of push constant data written, the union of the stages of all push constant
     /// ranges that covers that byte must be exactly `stages`. There's no good way of explaining this simply,
@@ -3158,6 +3392,8 @@ impl Queue {
     /// This method is intended to have low performance costs.
     /// As such, the write is not immediately submitted, and instead enqueued
     /// internally to happen at the start of the next `submit()` call.
+    ///
+    /// This method fails if `data` overruns the size of `buffer` starting at `offset`.
     pub fn write_buffer(&self, buffer: &Buffer, offset: BufferAddress, data: &[u8]) {
         Context::queue_write_buffer(&*self.context, &self.id, &buffer.id, offset, data)
     }
@@ -3167,6 +3403,8 @@ impl Queue {
     /// This method is intended to have low performance costs.
     /// As such, the write is not immediately submitted, and instead enqueued
     /// internally to happen at the start of the next `submit()` call.
+    ///
+    /// This method fails if `data` overruns the size of fragment of `texture` specified with `size`.
     pub fn write_texture(
         &self,
         texture: ImageCopyTexture,
@@ -3178,14 +3416,19 @@ impl Queue {
     }
 
     /// Submits a series of finished command buffers for execution.
-    pub fn submit<I: IntoIterator<Item = CommandBuffer>>(&self, command_buffers: I) {
-        Context::queue_submit(
+    pub fn submit<I: IntoIterator<Item = CommandBuffer>>(
+        &self,
+        command_buffers: I,
+    ) -> SubmissionIndex {
+        let raw = Context::queue_submit(
             &*self.context,
             &self.id,
             command_buffers
                 .into_iter()
                 .map(|mut comb| comb.id.take().unwrap()),
         );
+
+        SubmissionIndex(raw)
     }
 
     /// Gets the amount of nanoseconds each tick of a timestamp query represents.
@@ -3195,10 +3438,19 @@ impl Queue {
         Context::queue_get_timestamp_period(&*self.context, &self.id)
     }
 
-    /// Returns a future that resolves once all the work submitted by this point
-    /// is done processing on GPU.
-    pub fn on_submitted_work_done(&self) -> impl Future<Output = ()> + Send {
-        Context::queue_on_submitted_work_done(&*self.context, &self.id)
+    /// Registers a callback when the previous call to submit finishes running on the gpu. This callback
+    /// being called implies that all mapped buffer callbacks attached to the same submission have also
+    /// been called.
+    ///
+    /// For the callback to complete, either `queue.submit(..)`, `instance.poll_all(..)`, or `device.poll(..)`
+    /// must be called elsewhere in the runtime, possibly integrated into an event loop or run on a separate thread.
+    ///
+    /// The callback will be called on the thread that first calls the above functions after the gpu work
+    /// has completed. There are no restrictions on the code you can run in the callback, however on native the
+    /// call to the function will not complete until the callback returns, so prefer keeping callbacks short
+    /// and used to set flags, send messages, etc.
+    pub fn on_submitted_work_done(&self, callback: impl FnOnce() + Send + 'static) {
+        Context::queue_on_submitted_work_done(&*self.context, &self.id, Box::new(callback))
     }
 }
 
@@ -3285,12 +3537,12 @@ impl<T> UncapturedErrorHandler for T where T: Fn(Error) + Send + 'static {}
 #[derive(Debug)]
 pub enum Error {
     /// Out of memory error
-    OutOfMemoryError {
+    OutOfMemory {
         ///
         source: Box<dyn error::Error + Send + 'static>,
     },
     /// Validation error, signifying a bug in code or data
-    ValidationError {
+    Validation {
         ///
         source: Box<dyn error::Error + Send + 'static>,
         ///
@@ -3301,8 +3553,8 @@ pub enum Error {
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self {
-            Error::OutOfMemoryError { source } => Some(source.as_ref()),
-            Error::ValidationError { source, .. } => Some(source.as_ref()),
+            Error::OutOfMemory { source } => Some(source.as_ref()),
+            Error::Validation { source, .. } => Some(source.as_ref()),
         }
     }
 }
@@ -3310,8 +3562,8 @@ impl error::Error for Error {
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::OutOfMemoryError { .. } => f.write_str("Out of Memory"),
-            Error::ValidationError { description, .. } => f.write_str(description),
+            Error::OutOfMemory { .. } => f.write_str("Out of Memory"),
+            Error::Validation { description, .. } => f.write_str(description),
         }
     }
 }

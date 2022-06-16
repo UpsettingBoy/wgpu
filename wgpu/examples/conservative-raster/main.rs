@@ -26,8 +26,8 @@ impl Example {
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("Low Resolution Target"),
                 size: wgpu::Extent3d {
-                    width: config.width / 16,
-                    height: config.width / 16,
+                    width: (config.width / 16).max(1),
+                    height: (config.height / 16).max(1),
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -113,6 +113,7 @@ impl framework::Example for Example {
                 },
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
+                multiview: None,
             });
 
         let pipeline_triangle_regular =
@@ -132,6 +133,7 @@ impl framework::Example for Example {
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
+                multiview: None,
             });
 
         let pipeline_lines = if device
@@ -159,6 +161,7 @@ impl framework::Example for Example {
                     },
                     depth_stencil: None,
                     multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
                 }),
             )
         } else {
@@ -183,10 +186,7 @@ impl framework::Example for Example {
                         wgpu::BindGroupLayoutEntry {
                             binding: 1,
                             visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler {
-                                filtering: false,
-                                comparison: false,
-                            },
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                             count: None,
                         },
                     ],
@@ -218,6 +218,7 @@ impl framework::Example for Example {
                     primitive: wgpu::PrimitiveState::default(),
                     depth_stencil: None,
                     multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
                 }),
                 bind_group_layout,
             )

@@ -28,7 +28,7 @@ impl<I: Clone + Debug + wgc::id::TypedId> wgc::hub::IdentityHandlerFactory<I>
     for IdentityPassThroughFactory
 {
     type Filter = IdentityPassThrough<I>;
-    fn spawn(&self, _min_index: u32) -> Self::Filter {
+    fn spawn(&self) -> Self::Filter {
         IdentityPassThrough(PhantomData)
     }
 }
@@ -107,6 +107,15 @@ impl GlobalPlay for wgc::hub::Global<IdentityPassThroughFactory> {
                         destination,
                         destination_offset,
                     )
+                    .unwrap(),
+                trace::Command::PushDebugGroup(marker) => self
+                    .command_encoder_push_debug_group::<A>(encoder, &marker)
+                    .unwrap(),
+                trace::Command::PopDebugGroup => {
+                    self.command_encoder_pop_debug_group::<A>(encoder).unwrap()
+                }
+                trace::Command::InsertDebugMarker(marker) => self
+                    .command_encoder_insert_debug_marker::<A>(encoder, &marker)
                     .unwrap(),
                 trace::Command::RunComputePass { base } => {
                     self.command_encoder_run_compute_pass_impl::<A>(encoder, base.as_ref())

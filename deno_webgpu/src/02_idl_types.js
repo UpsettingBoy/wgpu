@@ -1,4 +1,4 @@
-// Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
+// Copyright 2018-2022 the Deno authors. All rights reserved. MIT license.
 
 // @ts-check
 /// <reference path="../web/internal.d.ts" />
@@ -56,13 +56,13 @@
   // INTERFACE: GPUSupportedLimits
   webidl.converters.GPUSupportedLimits = webidl.createInterfaceConverter(
     "GPUSupportedLimits",
-    GPUSupportedLimits,
+    GPUSupportedLimits.prototype,
   );
 
   // INTERFACE: GPUSupportedFeatures
   webidl.converters.GPUSupportedFeatures = webidl.createInterfaceConverter(
     "GPUSupportedFeatures",
-    GPUSupportedFeatures,
+    GPUSupportedFeatures.prototype,
   );
 
   // ENUM: GPUPredefinedColorSpace
@@ -72,7 +72,7 @@
   );
 
   // INTERFACE: GPU
-  webidl.converters.GPU = webidl.createInterfaceConverter("GPU", GPU);
+  webidl.converters.GPU = webidl.createInterfaceConverter("GPU", GPU.prototype);
 
   // ENUM: GPUPowerPreference
   webidl.converters["GPUPowerPreference"] = webidl.createEnumConverter(
@@ -104,35 +104,43 @@
   // INTERFACE: GPUAdapter
   webidl.converters.GPUAdapter = webidl.createInterfaceConverter(
     "GPUAdapter",
-    GPUAdapter,
+    GPUAdapter.prototype,
   );
 
   // ENUM: GPUFeatureName
   webidl.converters["GPUFeatureName"] = webidl.createEnumConverter(
     "GPUFeatureName",
     [
-      "depth-clamping",
+      "depth-clip-control",
       "depth24unorm-stencil8",
       "depth32float-stencil8",
       "pipeline-statistics-query",
       "texture-compression-bc",
+      "texture-compression-etc2",
+      "texture-compression-astc",
       "timestamp-query",
+      "indirect-first-instance",
+      "shader-f16",
       // extended from spec
       "mappable-primary-buffers",
-      "sampled-texture-binding-array",
-      "sampled-texture-array-dynamic-indexing",
-      "sampled-texture-array-non-uniform-indexing",
+      "texture-binding-array",
+      "buffer-binding-array",
+      "storage-resource-binding-array",
+      "sampled-texture-and-storage-buffer-array-non-uniform-indexing",
+      "uniform-buffer-and-storage-buffer-texture-non-uniform-indexing",
       "unsized-binding-array",
       "multi-draw-indirect",
       "multi-draw-indirect-count",
       "push-constants",
       "address-mode-clamp-to-border",
-      "non-fill-polygon-mode",
-      "texture-compression-etc2",
-      "texture-compression-astc-ldr",
       "texture-adapter-specific-format-features",
       "shader-float64",
       "vertex-attribute-64bit",
+      "conservative-rasterization",
+      "vertex-writable-storage",
+      "clear-commands",
+      "spirv-shader-passthrough",
+      "shader-primitive-index",
     ],
   );
 
@@ -171,13 +179,13 @@
   // INTERFACE: GPUDevice
   webidl.converters.GPUDevice = webidl.createInterfaceConverter(
     "GPUDevice",
-    GPUDevice,
+    GPUDevice.prototype,
   );
 
   // INTERFACE: GPUBuffer
   webidl.converters.GPUBuffer = webidl.createInterfaceConverter(
     "GPUBuffer",
-    GPUBuffer,
+    GPUBuffer.prototype,
   );
 
   // TYPEDEF: GPUSize64
@@ -211,7 +219,7 @@
   // INTERFACE: GPUBufferUsage
   webidl.converters.GPUBufferUsage = webidl.createInterfaceConverter(
     "GPUBufferUsage",
-    GPUBufferUsage,
+    GPUBufferUsage.prototype,
   );
 
   // TYPEDEF: GPUMapModeFlags
@@ -221,13 +229,13 @@
   // INTERFACE: GPUMapMode
   webidl.converters.GPUMapMode = webidl.createInterfaceConverter(
     "GPUMapMode",
-    GPUMapMode,
+    GPUMapMode.prototype,
   );
 
   // INTERFACE: GPUTexture
   webidl.converters.GPUTexture = webidl.createInterfaceConverter(
     "GPUTexture",
-    GPUTexture,
+    GPUTexture.prototype,
   );
 
   // TYPEDEF: GPUIntegerCoordinate
@@ -334,6 +342,8 @@
       "depth24plus",
       "depth24plus-stencil8",
       "depth32float",
+      "depth24unorm-stencil8",
+      "depth32float-stencil8",
       "bc1-rgba-unorm",
       "bc1-rgba-unorm-srgb",
       "bc2-rgba-unorm",
@@ -348,8 +358,44 @@
       "bc6h-rgb-float",
       "bc7-rgba-unorm",
       "bc7-rgba-unorm-srgb",
-      "depth24unorm-stencil8",
-      "depth32float-stencil8",
+      "etc2-rgb8unorm",
+      "etc2-rgb8unorm-srgb",
+      "etc2-rgb8a1unorm",
+      "etc2-rgb8a1unorm-srgb",
+      "etc2-rgba8unorm",
+      "etc2-rgba8unorm-srgb",
+      "eac-r11unorm",
+      "eac-r11snorm",
+      "eac-rg11unorm",
+      "eac-rg11snorm",
+      "astc-4x4-unorm",
+      "astc-4x4-unorm-srgb",
+      "astc-5x4-unorm",
+      "astc-5x4-unorm-srgb",
+      "astc-5x5-unorm",
+      "astc-5x5-unorm-srgb",
+      "astc-6x5-unorm",
+      "astc-6x5-unorm-srgb",
+      "astc-6x6-unorm",
+      "astc-6x6-unorm-srgb",
+      "astc-8x5-unorm",
+      "astc-8x5-unorm-srgb",
+      "astc-8x6-unorm",
+      "astc-8x6-unorm-srgb",
+      "astc-8x8-unorm",
+      "astc-8x8-unorm-srgb",
+      "astc-10x5-unorm",
+      "astc-10x5-unorm-srgb",
+      "astc-10x6-unorm",
+      "astc-10x6-unorm-srgb",
+      "astc-10x8-unorm",
+      "astc-10x8-unorm-srgb",
+      "astc-10x10-unorm",
+      "astc-10x10-unorm-srgb",
+      "astc-12x10-unorm",
+      "astc-12x10-unorm-srgb",
+      "astc-12x12-unorm",
+      "astc-12x12-unorm-srgb",
     ],
   );
 
@@ -399,13 +445,13 @@
   // INTERFACE: GPUTextureUsage
   webidl.converters.GPUTextureUsage = webidl.createInterfaceConverter(
     "GPUTextureUsage",
-    GPUTextureUsage,
+    GPUTextureUsage.prototype,
   );
 
   // INTERFACE: GPUTextureView
   webidl.converters.GPUTextureView = webidl.createInterfaceConverter(
     "GPUTextureView",
-    GPUTextureView,
+    GPUTextureView.prototype,
   );
 
   // ENUM: GPUTextureViewDimension
@@ -472,7 +518,7 @@
   // INTERFACE: GPUSampler
   webidl.converters.GPUSampler = webidl.createInterfaceConverter(
     "GPUSampler",
-    GPUSampler,
+    GPUSampler.prototype,
   );
 
   // ENUM: GPUAddressMode
@@ -488,6 +534,15 @@
   // ENUM: GPUFilterMode
   webidl.converters["GPUFilterMode"] = webidl.createEnumConverter(
     "GPUFilterMode",
+    [
+      "nearest",
+      "linear",
+    ],
+  );
+
+  // ENUM: GPUMipmapFilterMode
+  webidl.converters["GPUMipmapFilterMode"] = webidl.createEnumConverter(
+    "GPUMipmapFilterMode",
     [
       "nearest",
       "linear",
@@ -538,7 +593,7 @@
     },
     {
       key: "mipmapFilter",
-      converter: webidl.converters["GPUFilterMode"],
+      converter: webidl.converters["GPUMipmapFilterMode"],
       defaultValue: "nearest",
     },
     {
@@ -568,7 +623,7 @@
   // INTERFACE: GPUBindGroupLayout
   webidl.converters.GPUBindGroupLayout = webidl.createInterfaceConverter(
     "GPUBindGroupLayout",
-    GPUBindGroupLayout,
+    GPUBindGroupLayout.prototype,
   );
 
   // TYPEDEF: GPUIndex32
@@ -751,13 +806,13 @@
   // INTERFACE: GPUShaderStage
   webidl.converters.GPUShaderStage = webidl.createInterfaceConverter(
     "GPUShaderStage",
-    GPUShaderStage,
+    GPUShaderStage.prototype,
   );
 
   // INTERFACE: GPUBindGroup
   webidl.converters.GPUBindGroup = webidl.createInterfaceConverter(
     "GPUBindGroup",
-    GPUBindGroup,
+    GPUBindGroup.prototype,
   );
 
   // DICTIONARY: GPUBufferBinding
@@ -826,7 +881,7 @@
   // INTERFACE: GPUPipelineLayout
   webidl.converters.GPUPipelineLayout = webidl.createInterfaceConverter(
     "GPUPipelineLayout",
-    GPUPipelineLayout,
+    GPUPipelineLayout.prototype,
   );
 
   // DICTIONARY: GPUPipelineLayoutDescriptor
@@ -849,7 +904,7 @@
   // INTERFACE: GPUShaderModule
   webidl.converters.GPUShaderModule = webidl.createInterfaceConverter(
     "GPUShaderModule",
-    GPUShaderModule,
+    GPUShaderModule.prototype,
   );
 
   // DICTIONARY: GPUShaderModuleDescriptor
@@ -881,18 +936,21 @@
   // // INTERFACE: GPUCompilationMessage
   // webidl.converters.GPUCompilationMessage = webidl.createInterfaceConverter(
   //   "GPUCompilationMessage",
-  //   GPUCompilationMessage,
+  //   GPUCompilationMessage.prototype,
   // );
 
   // // INTERFACE: GPUCompilationInfo
   // webidl.converters.GPUCompilationInfo = webidl.createInterfaceConverter(
   //   "GPUCompilationInfo",
-  //   GPUCompilationInfo,
+  //   GPUCompilationInfo.prototype,
   // );
 
   // DICTIONARY: GPUPipelineDescriptorBase
   const dictMembersGPUPipelineDescriptorBase = [
-    { key: "layout", converter: webidl.converters["GPUPipelineLayout"] },
+    {
+      key: "layout",
+      converter: webidl.converters["GPUPipelineLayout"],
+    },
   ];
   webidl.converters["GPUPipelineDescriptorBase"] = webidl
     .createDictionaryConverter(
@@ -936,7 +994,7 @@
   // INTERFACE: GPUComputePipeline
   webidl.converters.GPUComputePipeline = webidl.createInterfaceConverter(
     "GPUComputePipeline",
-    GPUComputePipeline,
+    GPUComputePipeline.prototype,
   );
 
   // DICTIONARY: GPUComputePipelineDescriptor
@@ -958,7 +1016,7 @@
   // INTERFACE: GPURenderPipeline
   webidl.converters.GPURenderPipeline = webidl.createInterfaceConverter(
     "GPURenderPipeline",
-    GPURenderPipeline,
+    GPURenderPipeline.prototype,
   );
 
   // ENUM: GPUVertexStepMode
@@ -1131,7 +1189,7 @@
       defaultValue: "none",
     },
     {
-      key: "clampDepth",
+      key: "unclippedDepth",
       converter: webidl.converters["boolean"],
       defaultValue: false,
     },
@@ -1431,13 +1489,13 @@
   // INTERFACE: GPUColorWrite
   webidl.converters.GPUColorWrite = webidl.createInterfaceConverter(
     "GPUColorWrite",
-    GPUColorWrite,
+    GPUColorWrite.prototype,
   );
 
   // INTERFACE: GPUCommandBuffer
   webidl.converters.GPUCommandBuffer = webidl.createInterfaceConverter(
     "GPUCommandBuffer",
-    GPUCommandBuffer,
+    GPUCommandBuffer.prototype,
   );
   webidl.converters["sequence<GPUCommandBuffer>"] = webidl
     .createSequenceConverter(webidl.converters["GPUCommandBuffer"]);
@@ -1454,17 +1512,11 @@
   // INTERFACE: GPUCommandEncoder
   webidl.converters.GPUCommandEncoder = webidl.createInterfaceConverter(
     "GPUCommandEncoder",
-    GPUCommandEncoder,
+    GPUCommandEncoder.prototype,
   );
 
   // DICTIONARY: GPUCommandEncoderDescriptor
-  const dictMembersGPUCommandEncoderDescriptor = [
-    {
-      key: "measureExecutionTime",
-      converter: webidl.converters["boolean"],
-      defaultValue: false,
-    },
-  ];
+  const dictMembersGPUCommandEncoderDescriptor = [];
   webidl.converters["GPUCommandEncoderDescriptor"] = webidl
     .createDictionaryConverter(
       "GPUCommandEncoderDescriptor",
@@ -1615,7 +1667,7 @@
   // INTERFACE: GPUComputePassEncoder
   webidl.converters.GPUComputePassEncoder = webidl.createInterfaceConverter(
     "GPUComputePassEncoder",
-    GPUComputePassEncoder,
+    GPUComputePassEncoder.prototype,
   );
 
   // DICTIONARY: GPUComputePassDescriptor
@@ -1630,12 +1682,13 @@
   // INTERFACE: GPURenderPassEncoder
   webidl.converters.GPURenderPassEncoder = webidl.createInterfaceConverter(
     "GPURenderPassEncoder",
-    GPURenderPassEncoder,
+    GPURenderPassEncoder.prototype,
   );
 
   // ENUM: GPULoadOp
   webidl.converters["GPULoadOp"] = webidl.createEnumConverter("GPULoadOp", [
     "load",
+    "clear",
   ]);
 
   // DICTIONARY: GPUColorDict
@@ -1685,8 +1738,12 @@
     },
     { key: "resolveTarget", converter: webidl.converters["GPUTextureView"] },
     {
-      key: "loadValue",
-      converter: webidl.converters.any, /** put union here! **/
+      key: "clearValue",
+      converter: webidl.converters["GPUColor"],
+    },
+    {
+      key: "loadOp",
+      converter: webidl.converters["GPULoadOp"],
       required: true,
     },
     {
@@ -1709,14 +1766,17 @@
       required: true,
     },
     {
-      key: "depthLoadValue",
-      converter: webidl.converters.any, /** put union here! **/
-      required: true,
+      key: "depthClearValue",
+      converter: webidl.converters["float"],
+      defaultValue: 0,
+    },
+    {
+      key: "depthLoadOp",
+      converter: webidl.converters["GPULoadOp"],
     },
     {
       key: "depthStoreOp",
       converter: webidl.converters["GPUStoreOp"],
-      required: true,
     },
     {
       key: "depthReadOnly",
@@ -1724,14 +1784,17 @@
       defaultValue: false,
     },
     {
-      key: "stencilLoadValue",
-      converter: webidl.converters.any, /** put union here! **/
-      required: true,
+      key: "stencilClearValue",
+      converter: webidl.converters["GPUStencilValue"],
+      defaultValue: 0,
+    },
+    {
+      key: "stencilLoadOp",
+      converter: webidl.converters["GPULoadOp"],
     },
     {
       key: "stencilStoreOp",
       converter: webidl.converters["GPUStoreOp"],
-      required: true,
     },
     {
       key: "stencilReadOnly",
@@ -1748,7 +1811,7 @@
   // INTERFACE: GPUQuerySet
   webidl.converters.GPUQuerySet = webidl.createInterfaceConverter(
     "GPUQuerySet",
-    GPUQuerySet,
+    GPUQuerySet.prototype,
   );
 
   // DICTIONARY: GPURenderPassDescriptor
@@ -1776,7 +1839,7 @@
   // INTERFACE: GPURenderBundle
   webidl.converters.GPURenderBundle = webidl.createInterfaceConverter(
     "GPURenderBundle",
-    GPURenderBundle,
+    GPURenderBundle.prototype,
   );
   webidl.converters["sequence<GPURenderBundle>"] = webidl
     .createSequenceConverter(webidl.converters["GPURenderBundle"]);
@@ -1793,7 +1856,7 @@
   // INTERFACE: GPURenderBundleEncoder
   webidl.converters.GPURenderBundleEncoder = webidl.createInterfaceConverter(
     "GPURenderBundleEncoder",
-    GPURenderBundleEncoder,
+    GPURenderBundleEncoder.prototype,
   );
 
   // DICTIONARY: GPURenderPassLayout
@@ -1846,7 +1909,7 @@
   // INTERFACE: GPUQueue
   webidl.converters.GPUQueue = webidl.createInterfaceConverter(
     "GPUQueue",
-    GPUQueue,
+    GPUQueue.prototype,
   );
 
   // ENUM: GPUQueryType
@@ -1906,7 +1969,7 @@
   // // INTERFACE: GPUDeviceLostInfo
   // webidl.converters.GPUDeviceLostInfo = webidl.createInterfaceConverter(
   //   "GPUDeviceLostInfo",
-  //   GPUDeviceLostInfo,
+  //   GPUDeviceLostInfo.prototype,
   // );
 
   // ENUM: GPUErrorFilter
@@ -1921,13 +1984,13 @@
   // INTERFACE: GPUOutOfMemoryError
   webidl.converters.GPUOutOfMemoryError = webidl.createInterfaceConverter(
     "GPUOutOfMemoryError",
-    GPUOutOfMemoryError,
+    GPUOutOfMemoryError.prototype,
   );
 
   // INTERFACE: GPUValidationError
   webidl.converters.GPUValidationError = webidl.createInterfaceConverter(
     "GPUValidationError",
-    GPUValidationError,
+    GPUValidationError.prototype,
   );
 
   // TYPEDEF: GPUError
@@ -1936,7 +1999,7 @@
   // // INTERFACE: GPUUncapturedErrorEvent
   // webidl.converters.GPUUncapturedErrorEvent = webidl.createInterfaceConverter(
   //   "GPUUncapturedErrorEvent",
-  //   GPUUncapturedErrorEvent,
+  //   GPUUncapturedErrorEvent.prototype,
   // );
 
   // DICTIONARY: GPUUncapturedErrorEventInit

@@ -1,10 +1,7 @@
 // Flocking boids example with gpu compute update pass
 // adapted from https://github.com/austinEng/webgpu-samples/blob/master/src/examples/computeBoids.ts
 
-use rand::{
-    distributions::{Distribution, Uniform},
-    SeedableRng,
-};
+use nanorand::{Rng, WyRand};
 use std::{borrow::Cow, mem};
 use wgpu::util::DeviceExt;
 
@@ -137,7 +134,7 @@ impl framework::Example for Example {
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &draw_shader,
-                entry_point: "main",
+                entry_point: "main_vs",
                 buffers: &[
                     wgpu::VertexBufferLayout {
                         array_stride: 4 * 4,
@@ -153,12 +150,13 @@ impl framework::Example for Example {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &draw_shader,
-                entry_point: "main",
+                entry_point: "main_fs",
                 targets: &[config.format.into()],
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
+            multiview: None,
         });
 
         // create compute pipeline
@@ -182,13 +180,13 @@ impl framework::Example for Example {
         // buffer for all particles data of type [(posx,posy,velx,vely),...]
 
         let mut initial_particle_data = vec![0.0f32; (4 * NUM_PARTICLES) as usize];
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let unif = Uniform::new_inclusive(-1.0, 1.0);
+        let mut rng = WyRand::new_seed(42);
+        let mut unif = || rng.generate::<f32>() * 2f32 - 1f32; // Generate a num (-1, 1)
         for particle_instance_chunk in initial_particle_data.chunks_mut(4) {
-            particle_instance_chunk[0] = unif.sample(&mut rng); // posx
-            particle_instance_chunk[1] = unif.sample(&mut rng); // posy
-            particle_instance_chunk[2] = unif.sample(&mut rng) * 0.1; // velx
-            particle_instance_chunk[3] = unif.sample(&mut rng) * 0.1; // vely
+            particle_instance_chunk[0] = unif(); // posx
+            particle_instance_chunk[1] = unif(); // posy
+            particle_instance_chunk[2] = unif() * 0.1; // velx
+            particle_instance_chunk[3] = unif() * 0.1; // vely
         }
 
         // creates two buffers of particle data each of size NUM_PARTICLES
@@ -278,7 +276,9 @@ impl framework::Example for Example {
             view,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                // Not clearing here in order to test wgpu's zero texture initialization on a surface texture.
+                // Users should avoid loading uninitialized memory since this can cause additional overhead.
+                load: wgpu::LoadOp::Load,
                 store: true,
             },
         }];
@@ -299,7 +299,7 @@ impl framework::Example for Example {
                 command_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: None });
             cpass.set_pipeline(&self.compute_pipeline);
             cpass.set_bind_group(0, &self.particle_bind_groups[self.frame_num % 2], &[]);
-            cpass.dispatch(self.work_group_count, 1, 1);
+            cpass.dispatch_workgroups(self.work_group_count, 1, 1);
         }
         command_encoder.pop_debug_group();
 
@@ -337,7 +337,8 @@ fn boids() {
         height: 768,
         optional_features: wgpu::Features::default(),
         base_test_parameters: framework::test_common::TestParameters::default()
-            .downlevel_flags(wgpu::DownlevelFlags::COMPUTE_SHADERS),
+            .downlevel_flags(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+            .limits(wgpu::Limits::downlevel_defaults()),
         tolerance: 0,
         max_outliers: 2500, // Currently bounded by WARP
     });

@@ -1,4 +1,6 @@
-use super::{conv, HResult as _};
+use crate::auxil::{self, dxgi::result::HResult as _};
+
+use super::conv;
 use std::{mem, ops::Range, ptr};
 use winapi::{shared::dxgiformat, um::d3d12};
 
@@ -10,6 +12,40 @@ fn make_box(origin: &wgt::Origin3d, size: &crate::CopyExtent) -> d3d12::D3D12_BO
         bottom: origin.y + size.height,
         front: origin.z,
         back: origin.z + size.depth,
+    }
+}
+
+impl crate::BufferTextureCopy {
+    fn to_subresource_footprint(
+        &self,
+        format: wgt::TextureFormat,
+    ) -> d3d12::D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+        let desc = format.describe();
+        d3d12::D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+            Offset: self.buffer_layout.offset,
+            Footprint: d3d12::D3D12_SUBRESOURCE_FOOTPRINT {
+                Format: auxil::dxgi::conv::map_texture_format(format),
+                Width: self.size.width,
+                Height: self
+                    .buffer_layout
+                    .rows_per_image
+                    .map_or(self.size.height, |count| {
+                        count.get() * desc.block_dimensions.1 as u32
+                    }),
+                Depth: self.size.depth,
+                RowPitch: {
+                    let actual = match self.buffer_layout.bytes_per_row {
+                        Some(count) => count.get(),
+                        // this may happen for single-line updates
+                        None => {
+                            (self.size.width / desc.block_dimensions.0 as u32)
+                                * desc.block_size as u32
+                        }
+                    };
+                    crate::auxil::align_to(actual, d3d12::D3D12_TEXTURE_DATA_PITCH_ALIGNMENT)
+                },
+            },
+        }
     }
 }
 
@@ -255,7 +291,7 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
                     StateAfter: s1,
                 };
                 self.temp.barriers.push(raw);
-            } else if barrier.usage.start == crate::BufferUses::STORAGE_WRITE {
+            } else if barrier.usage.start == crate::BufferUses::STORAGE_READ_WRITE {
                 let mut raw = d3d12::D3D12_RESOURCE_BARRIER {
                     Type: d3d12::D3D12_RESOURCE_BARRIER_TYPE_UAV,
                     Flags: d3d12::D3D12_RESOURCE_BARRIER_FLAG_NONE,
@@ -323,19 +359,34 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
                     // Only one barrier if it affects the whole image.
                     self.temp.barriers.push(raw);
                 } else {
-                    // Generate barrier for each layer/level combination.
+                    // Selected texture aspect is relevant if the texture format has both depth _and_ stencil aspects.
+                    let planes = if crate::FormatAspects::from(barrier.texture.format)
+                        .contains(crate::FormatAspects::DEPTH | crate::FormatAspects::STENCIL)
+                    {
+                        match barrier.range.aspect {
+                            wgt::TextureAspect::All => 0..2,
+                            wgt::TextureAspect::StencilOnly => 1..2,
+                            wgt::TextureAspect::DepthOnly => 0..1,
+                        }
+                    } else {
+                        0..1
+                    };
+
                     for rel_mip_level in 0..mip_level_count {
                         for rel_array_layer in 0..array_layer_count {
-                            raw.u.Transition_mut().Subresource = barrier.texture.calc_subresource(
-                                barrier.range.base_mip_level + rel_mip_level,
-                                barrier.range.base_array_layer + rel_array_layer,
-                                0,
-                            );
-                            self.temp.barriers.push(raw);
+                            for plane in planes.clone() {
+                                raw.u.Transition_mut().Subresource =
+                                    barrier.texture.calc_subresource(
+                                        barrier.range.base_mip_level + rel_mip_level,
+                                        barrier.range.base_array_layer + rel_array_layer,
+                                        plane,
+                                    );
+                                self.temp.barriers.push(raw);
+                            }
                         }
                     }
                 }
-            } else if barrier.usage.start == crate::TextureUses::STORAGE_WRITE {
+            } else if barrier.usage.start == crate::TextureUses::STORAGE_READ_WRITE {
                 let mut raw = d3d12::D3D12_RESOURCE_BARRIER {
                     Type: d3d12::D3D12_RESOURCE_BARRIER_TYPE_UAV,
                     Flags: d3d12::D3D12_RESOURCE_BARRIER_FLAG_NONE,
@@ -517,28 +568,10 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
             Type: d3d12::D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
             u: mem::zeroed(),
         };
-        let raw_format = conv::map_texture_format(dst.format);
-
-        let block_size = dst.format.describe().block_dimensions.0 as u32;
         for r in regions {
             let src_box = make_box(&wgt::Origin3d::ZERO, &r.size);
-            *src_location.u.PlacedFootprint_mut() = d3d12::D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                Offset: r.buffer_layout.offset,
-                Footprint: d3d12::D3D12_SUBRESOURCE_FOOTPRINT {
-                    Format: raw_format,
-                    Width: r.size.width,
-                    Height: r
-                        .buffer_layout
-                        .rows_per_image
-                        .map_or(r.size.height, |count| count.get() * block_size),
-                    Depth: r.size.depth,
-                    RowPitch: r.buffer_layout.bytes_per_row.map_or(0, |count| {
-                        count.get().max(d3d12::D3D12_TEXTURE_DATA_PITCH_ALIGNMENT)
-                    }),
-                },
-            };
+            *src_location.u.PlacedFootprint_mut() = r.to_subresource_footprint(dst.format);
             *dst_location.u.SubresourceIndex_mut() = dst.calc_subresource_for_copy(&r.texture_base);
-
             list.CopyTextureRegion(
                 &dst_location,
                 r.texture_base.origin.x,
@@ -570,26 +603,10 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
             Type: d3d12::D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
             u: mem::zeroed(),
         };
-        let raw_format = conv::map_texture_format(src.format);
-
-        let block_size = src.format.describe().block_dimensions.0 as u32;
         for r in regions {
             let src_box = make_box(&r.texture_base.origin, &r.size);
             *src_location.u.SubresourceIndex_mut() = src.calc_subresource_for_copy(&r.texture_base);
-            *dst_location.u.PlacedFootprint_mut() = d3d12::D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                Offset: r.buffer_layout.offset,
-                Footprint: d3d12::D3D12_SUBRESOURCE_FOOTPRINT {
-                    Format: raw_format,
-                    Width: r.size.width,
-                    Height: r
-                        .buffer_layout
-                        .rows_per_image
-                        .map_or(r.size.height, |count| count.get() * block_size),
-                    Depth: r.size.depth,
-                    RowPitch: r.buffer_layout.bytes_per_row.map_or(0, |count| count.get()),
-                },
-            };
-
+            *dst_location.u.PlacedFootprint_mut() = r.to_subresource_footprint(src.format);
             list.CopyTextureRegion(&dst_location, 0, 0, 0, &src_location, &src_box);
         }
     }
@@ -681,10 +698,15 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
         }
         if let Some(ref ds) = desc.depth_stencil_attachment {
             let mut flags = native::ClearFlags::empty();
-            if !ds.depth_ops.contains(crate::AttachmentOps::LOAD) {
+            let aspects = ds.target.view.format_aspects;
+            if !ds.depth_ops.contains(crate::AttachmentOps::LOAD)
+                && aspects.contains(crate::FormatAspects::DEPTH)
+            {
                 flags |= native::ClearFlags::DEPTH;
             }
-            if !ds.stencil_ops.contains(crate::AttachmentOps::LOAD) {
+            if !ds.stencil_ops.contains(crate::AttachmentOps::LOAD)
+                && aspects.contains(crate::FormatAspects::STENCIL)
+            {
                 flags |= native::ClearFlags::STENCIL;
             }
 
@@ -888,7 +910,7 @@ impl crate::CommandEncoder<super::Api> for super::CommandEncoder {
         self.list.unwrap().set_index_buffer(
             binding.resolve_address(),
             binding.resolve_size() as u32,
-            conv::map_index_format(format),
+            auxil::dxgi::conv::map_index_format(format),
         );
     }
     unsafe fn set_vertex_buffer<'a>(

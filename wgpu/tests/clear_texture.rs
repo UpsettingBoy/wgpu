@@ -1,4 +1,5 @@
 use crate::common::{initialize_test, TestParameters, TestingContext};
+use wgpu::util::align_to;
 
 static TEXTURE_FORMATS_UNCOMPRESSED: &[wgpu::TextureFormat] = &[
     wgpu::TextureFormat::R8Unorm,
@@ -36,10 +37,13 @@ static TEXTURE_FORMATS_UNCOMPRESSED: &[wgpu::TextureFormat] = &[
     wgpu::TextureFormat::Rgba32Uint,
     wgpu::TextureFormat::Rgba32Sint,
     wgpu::TextureFormat::Rgba32Float,
+    wgpu::TextureFormat::Rgb9e5Ufloat,
+];
+
+static TEXTURE_FORMATS_DEPTH: &[wgpu::TextureFormat] = &[
     wgpu::TextureFormat::Depth32Float,
     wgpu::TextureFormat::Depth24Plus,
     wgpu::TextureFormat::Depth24PlusStencil8,
-    wgpu::TextureFormat::Rgb9e5Ufloat,
 ];
 
 // needs TEXTURE_COMPRESSION_BC
@@ -75,35 +79,120 @@ static TEXTURE_FORMATS_ETC2: &[wgpu::TextureFormat] = &[
 ];
 
 // needs TEXTURE_COMPRESSION_ASTC_LDR
+use wgpu::{AstcBlock, AstcChannel};
 static TEXTURE_FORMATS_ASTC: &[wgpu::TextureFormat] = &[
-    wgpu::TextureFormat::Astc4x4RgbaUnorm,
-    wgpu::TextureFormat::Astc4x4RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc5x4RgbaUnorm,
-    wgpu::TextureFormat::Astc5x4RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc5x5RgbaUnorm,
-    wgpu::TextureFormat::Astc5x5RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc6x5RgbaUnorm,
-    wgpu::TextureFormat::Astc6x5RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc6x6RgbaUnorm,
-    wgpu::TextureFormat::Astc6x6RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc8x5RgbaUnorm,
-    wgpu::TextureFormat::Astc8x5RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc8x6RgbaUnorm,
-    wgpu::TextureFormat::Astc8x6RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc10x5RgbaUnorm,
-    wgpu::TextureFormat::Astc10x5RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc10x6RgbaUnorm,
-    wgpu::TextureFormat::Astc10x6RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc8x8RgbaUnorm,
-    wgpu::TextureFormat::Astc8x8RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc10x8RgbaUnorm,
-    wgpu::TextureFormat::Astc10x8RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc10x10RgbaUnorm,
-    wgpu::TextureFormat::Astc10x10RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc12x10RgbaUnorm,
-    wgpu::TextureFormat::Astc12x10RgbaUnormSrgb,
-    wgpu::TextureFormat::Astc12x12RgbaUnorm,
-    wgpu::TextureFormat::Astc12x12RgbaUnormSrgb,
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B4x4,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B5x4,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B5x5,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B6x5,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B6x6,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B8x5,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B8x6,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B8x8,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B10x5,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B10x6,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B10x8,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B10x10,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B12x10,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B12x12,
+        channel: AstcChannel::Unorm,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B4x4,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B5x4,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B5x5,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B6x5,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B6x6,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B8x5,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B8x6,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B8x8,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B10x5,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B10x6,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B10x8,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B10x10,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B12x10,
+        channel: AstcChannel::UnormSrgb,
+    },
+    wgpu::TextureFormat::Astc {
+        block: AstcBlock::B12x12,
+        channel: AstcChannel::UnormSrgb,
+    },
 ];
 
 fn single_texture_clear_test(
@@ -112,12 +201,10 @@ fn single_texture_clear_test(
     size: wgpu::Extent3d,
     dimension: wgpu::TextureDimension,
 ) {
-    // clear_texture not supported for depth textures.
-    if format.describe().sample_type == wgpu::TextureSampleType::Depth {
-        return;
-    }
-
-    println!("clearing texture with {:?}", format);
+    println!(
+        "clearing texture with {:?}, dimension {:?}, size {:?}",
+        format, dimension, size
+    );
 
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some(&format!("texture {:?}", format)),
@@ -131,7 +218,9 @@ fn single_texture_clear_test(
         sample_count: 1, // multisampling is not supported for clear
         dimension,
         format,
-        usage: wgpu::TextureUsages::COPY_DST,
+        // Forces internally the required usages to be able to clear it.
+        // This is not visible on the API level.
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
     });
     let mut encoder = ctx
         .device
@@ -151,15 +240,24 @@ fn single_texture_clear_test(
     // TODO: Read back and check zeroness?
 }
 
-fn clear_texture_tests(ctx: &TestingContext, formats: &[wgpu::TextureFormat], supports_1d: bool) {
+fn clear_texture_tests(
+    ctx: &TestingContext,
+    formats: &[wgpu::TextureFormat],
+    supports_1d: bool,
+    supports_3d: bool,
+) {
     for &format in formats {
+        let desc = format.describe();
+        let rounded_width = align_to(64, desc.block_dimensions.0 as u32);
+        let rounded_height = align_to(64, desc.block_dimensions.1 as u32);
+
         // 1D texture
         if supports_1d {
             single_texture_clear_test(
                 ctx,
                 format,
                 wgpu::Extent3d {
-                    width: 64,
+                    width: rounded_width,
                     height: 1,
                     depth_or_array_layers: 1,
                 },
@@ -171,8 +269,8 @@ fn clear_texture_tests(ctx: &TestingContext, formats: &[wgpu::TextureFormat], su
             ctx,
             format,
             wgpu::Extent3d {
-                width: 64,
-                height: 64,
+                width: rounded_width,
+                height: rounded_height,
                 depth_or_array_layers: 1,
             },
             wgpu::TextureDimension::D2,
@@ -182,32 +280,67 @@ fn clear_texture_tests(ctx: &TestingContext, formats: &[wgpu::TextureFormat], su
             ctx,
             format,
             wgpu::Extent3d {
-                width: 64,
-                height: 64,
+                width: rounded_width,
+                height: rounded_height,
                 depth_or_array_layers: 4,
             },
             wgpu::TextureDimension::D2,
         );
-        // volume texture
-        single_texture_clear_test(
-            ctx,
-            format,
-            wgpu::Extent3d {
-                width: 16,
-                height: 16,
-                depth_or_array_layers: 16,
-            },
-            wgpu::TextureDimension::D3,
-        );
+        if supports_3d {
+            // volume texture
+            single_texture_clear_test(
+                ctx,
+                format,
+                wgpu::Extent3d {
+                    width: rounded_width,
+                    height: rounded_height,
+                    depth_or_array_layers: 16,
+                },
+                wgpu::TextureDimension::D3,
+            );
+        }
     }
 }
 
 #[test]
 fn clear_texture_2d_uncompressed() {
     initialize_test(
-        TestParameters::default().features(wgpu::Features::CLEAR_COMMANDS),
+        TestParameters::default().features(wgpu::Features::CLEAR_TEXTURE),
         |ctx| {
-            clear_texture_tests(&ctx, TEXTURE_FORMATS_UNCOMPRESSED, true);
+            clear_texture_tests(&ctx, TEXTURE_FORMATS_UNCOMPRESSED, true, true);
+            clear_texture_tests(&ctx, TEXTURE_FORMATS_DEPTH, false, false);
+        },
+    )
+}
+
+#[test]
+fn clear_texture_d32_s8() {
+    initialize_test(
+        TestParameters::default()
+            .features(wgpu::Features::CLEAR_TEXTURE | wgpu::Features::DEPTH32FLOAT_STENCIL8),
+        |ctx| {
+            clear_texture_tests(
+                &ctx,
+                &[wgpu::TextureFormat::Depth32FloatStencil8],
+                false,
+                false,
+            );
+        },
+    )
+}
+
+#[test]
+fn clear_texture_d24_s8() {
+    initialize_test(
+        TestParameters::default()
+            .features(wgpu::Features::CLEAR_TEXTURE | wgpu::Features::DEPTH24UNORM_STENCIL8),
+        |ctx| {
+            clear_texture_tests(
+                &ctx,
+                &[wgpu::TextureFormat::Depth24UnormStencil8],
+                false,
+                false,
+            );
         },
     )
 }
@@ -216,9 +349,10 @@ fn clear_texture_2d_uncompressed() {
 fn clear_texture_2d_bc() {
     initialize_test(
         TestParameters::default()
-            .features(wgpu::Features::CLEAR_COMMANDS | wgpu::Features::TEXTURE_COMPRESSION_BC),
+            .features(wgpu::Features::CLEAR_TEXTURE | wgpu::Features::TEXTURE_COMPRESSION_BC)
+            .specific_failure(Some(wgpu::Backends::GL), None, Some("ANGLE"), false), // https://bugs.chromium.org/p/angleproject/issues/detail?id=7056
         |ctx| {
-            clear_texture_tests(&ctx, TEXTURE_FORMATS_BC, false);
+            clear_texture_tests(&ctx, TEXTURE_FORMATS_BC, false, false);
         },
     )
 }
@@ -226,11 +360,11 @@ fn clear_texture_2d_bc() {
 #[test]
 fn clear_texture_2d_astc() {
     initialize_test(
-        TestParameters::default().features(
-            wgpu::Features::CLEAR_COMMANDS | wgpu::Features::TEXTURE_COMPRESSION_ASTC_LDR,
-        ),
+        TestParameters::default()
+            .features(wgpu::Features::CLEAR_TEXTURE | wgpu::Features::TEXTURE_COMPRESSION_ASTC_LDR)
+            .specific_failure(Some(wgpu::Backends::GL), None, Some("ANGLE"), false), // https://bugs.chromium.org/p/angleproject/issues/detail?id=7056
         |ctx| {
-            clear_texture_tests(&ctx, TEXTURE_FORMATS_ASTC, false);
+            clear_texture_tests(&ctx, TEXTURE_FORMATS_ASTC, false, false);
         },
     )
 }
@@ -239,9 +373,10 @@ fn clear_texture_2d_astc() {
 fn clear_texture_2d_etc2() {
     initialize_test(
         TestParameters::default()
-            .features(wgpu::Features::CLEAR_COMMANDS | wgpu::Features::TEXTURE_COMPRESSION_ETC2),
+            .features(wgpu::Features::CLEAR_TEXTURE | wgpu::Features::TEXTURE_COMPRESSION_ETC2)
+            .specific_failure(Some(wgpu::Backends::GL), None, Some("ANGLE"), false), // https://bugs.chromium.org/p/angleproject/issues/detail?id=7056
         |ctx| {
-            clear_texture_tests(&ctx, TEXTURE_FORMATS_ETC2, false);
+            clear_texture_tests(&ctx, TEXTURE_FORMATS_ETC2, false, false);
         },
     )
 }

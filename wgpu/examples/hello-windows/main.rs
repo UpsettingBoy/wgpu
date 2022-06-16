@@ -1,3 +1,5 @@
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
+
 use std::collections::HashMap;
 use winit::{
     event::{Event, WindowEvent},
@@ -106,6 +108,8 @@ async fn run(event_loop: EventLoop<()>, viewports: Vec<(Window, wgpu::Color)>) {
                 // Recreate the swap chain with the new size
                 if let Some(viewport) = viewports.get_mut(&window_id) {
                     viewport.resize(&device, size);
+                    // On macos the window needs to be redrawn manually after resizing
+                    viewport.desc.window.request_redraw();
                 }
             }
             Event::RedrawRequested(window_id) => {

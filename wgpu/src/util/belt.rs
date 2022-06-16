@@ -1,45 +1,12 @@
 use crate::{
-    Buffer, BufferAddress, BufferDescriptor, BufferSize, BufferUsages, BufferViewMut,
-    CommandEncoder, Device, MapMode,
+    util::align_to, Buffer, BufferAddress, BufferDescriptor, BufferSize, BufferUsages,
+    BufferViewMut, CommandEncoder, Device, MapMode,
 };
-use std::pin::Pin;
-use std::task::{self, Poll};
-use std::{future::Future, sync::mpsc};
-
-// Given a vector of futures, poll each in parallel until all are ready.
-struct Join<F> {
-    futures: Vec<Option<F>>,
-}
-
-impl<F: Future<Output = ()>> Future for Join<F> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut task::Context) -> Poll<Self::Output> {
-        // This is safe because we have no Drop implementation to violate the Pin requirements and
-        // do not provide any means of moving the inner futures.
-        let all_ready = unsafe {
-            // Poll all remaining futures, removing all that are ready
-            self.get_unchecked_mut().futures.iter_mut().all(|opt| {
-                if let Some(future) = opt {
-                    if Pin::new_unchecked(future).poll(cx) == Poll::Ready(()) {
-                        *opt = None;
-                    }
-                }
-
-                opt.is_none()
-            })
-        };
-
-        if all_ready {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    }
-}
+use std::fmt;
+use std::sync::{mpsc, Arc};
 
 struct Chunk {
-    buffer: Buffer,
+    buffer: Arc<Buffer>,
     size: BufferAddress,
     offset: BufferAddress,
 }
@@ -47,14 +14,16 @@ struct Chunk {
 /// Staging belt is a machine that uploads data.
 ///
 /// Internally it uses a ring-buffer of staging buffers that are sub-allocated.
-/// It has an advantage over `Queue.write_buffer` in a way that it returns a mutable slice,
+/// It has an advantage over [`Queue::write_buffer`] in a way that it returns a mutable slice,
 /// which you can fill to avoid an extra data copy.
 ///
 /// Using a staging belt is slightly complicated, and generally goes as follows:
-/// - Write to buffers that need writing to using `write_buffer`.
+/// - Write to buffers that need writing to using [`StagingBelt::write_buffer`].
 /// - Call `finish`.
-/// - Submit all command encoders used with `write_buffer`.
+/// - Submit all command encoders used with `StagingBelt::write_buffer`.
 /// - Call `recall`
+///
+/// [`Queue::write_buffer`]: crate::Queue::write_buffer
 pub struct StagingBelt {
     chunk_size: BufferAddress,
     /// Chunks that we are actively using for pending transfers at this moment.
@@ -113,12 +82,12 @@ impl StagingBelt {
         } else {
             let size = self.chunk_size.max(size.get());
             Chunk {
-                buffer: device.create_buffer(&BufferDescriptor {
-                    label: Some("staging"),
+                buffer: Arc::new(device.create_buffer(&BufferDescriptor {
+                    label: Some("(wgpu internal) StagingBelt staging buffer"),
                     size,
                     usage: BufferUsages::MAP_WRITE | BufferUsages::COPY_SRC,
                     mapped_at_creation: true,
-                }),
+                })),
                 size,
                 offset: 0,
             }
@@ -126,11 +95,7 @@ impl StagingBelt {
 
         encoder.copy_buffer_to_buffer(&chunk.buffer, chunk.offset, target, offset, size.get());
         let old_offset = chunk.offset;
-        chunk.offset += size.get();
-        let remainder = chunk.offset % crate::MAP_ALIGNMENT;
-        if remainder != 0 {
-            chunk.offset += crate::MAP_ALIGNMENT - remainder;
-        }
+        chunk.offset = align_to(chunk.offset + size.get(), crate::MAP_ALIGNMENT);
 
         self.active_chunks.push(chunk);
         self.active_chunks
@@ -155,30 +120,33 @@ impl StagingBelt {
     /// Recall all of the closed buffers back to be reused.
     ///
     /// This has to be called after the command encoders written to `write_buffer` are submitted!
-    pub fn recall(&mut self) -> impl Future<Output = ()> + Send {
+    pub fn recall(&mut self) {
         while let Ok(mut chunk) = self.receiver.try_recv() {
             chunk.offset = 0;
             self.free_chunks.push(chunk);
         }
 
         let sender = &self.sender;
-        let futures = self
-            .closed_chunks
-            .drain(..)
-            .map(|chunk| {
-                let sender = sender.clone();
-                let async_buffer = chunk.buffer.slice(..).map_async(MapMode::Write);
-
-                Some(async move {
-                    // The result is ignored
-                    async_buffer.await.ok();
-
-                    // The only possible error is the other side disconnecting, which is fine
+        for chunk in self.closed_chunks.drain(..) {
+            let sender = sender.clone();
+            chunk
+                .buffer
+                .clone()
+                .slice(..)
+                .map_async(MapMode::Write, move |_| {
                     let _ = sender.send(chunk);
-                })
-            })
-            .collect::<Vec<_>>();
+                });
+        }
+    }
+}
 
-        Join { futures }
+impl fmt::Debug for StagingBelt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StagingBelt")
+            .field("chunk_size", &self.chunk_size)
+            .field("active_chunks", &self.active_chunks.len())
+            .field("closed_chunks", &self.closed_chunks.len())
+            .field("free_chunks", &self.free_chunks.len())
+            .finish_non_exhaustive()
     }
 }

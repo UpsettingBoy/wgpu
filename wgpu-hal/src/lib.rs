@@ -52,34 +52,26 @@ compile_error!("Metal API enabled on non-Apple OS. If your project is not using 
 #[cfg(all(feature = "dx12", not(windows)))]
 compile_error!("DX12 API enabled on non-Windows OS. If your project is not using resolver=\"2\" in Cargo.toml, it should.");
 
+#[cfg(all(feature = "dx11", windows))]
+mod dx11;
 #[cfg(all(feature = "dx12", windows))]
 mod dx12;
 mod empty;
-#[cfg(all(
-    feature = "gles",
-    any(
-        target_arch = "wasm32",
-        all(unix, not(target_os = "ios"), not(target_os = "macos"))
-    )
-))]
+#[cfg(all(feature = "gles"))]
 mod gles;
-#[cfg(all(feature = "metal", any(target_os = "macos", target_os = "ios")))]
+#[cfg(all(feature = "metal"))]
 mod metal;
 #[cfg(feature = "vulkan")]
 mod vulkan;
 
 pub mod auxil;
 pub mod api {
+    #[cfg(feature = "dx11")]
+    pub use super::dx11::Api as Dx11;
     #[cfg(feature = "dx12")]
     pub use super::dx12::Api as Dx12;
     pub use super::empty::Api as Empty;
-    #[cfg(all(
-        feature = "gles",
-        any(
-            target_arch = "wasm32",
-            all(unix, not(target_os = "ios"), not(target_os = "macos"))
-        )
-    ))]
+    #[cfg(feature = "gles")]
     pub use super::gles::Api as Gles;
     #[cfg(feature = "metal")]
     pub use super::metal::Api as Metal;
@@ -93,9 +85,10 @@ pub use vulkan::UpdateAfterBindTypes;
 use std::{
     borrow::Borrow,
     fmt,
-    num::NonZeroU8,
+    num::{NonZeroU32, NonZeroU8},
     ops::{Range, RangeInclusive},
     ptr::NonNull,
+    sync::atomic::AtomicBool,
 };
 
 use bitflags::bitflags;
@@ -104,7 +97,7 @@ use thiserror::Error;
 pub const MAX_ANISOTROPY: u8 = 16;
 pub const MAX_BIND_GROUPS: usize = 8;
 pub const MAX_VERTEX_BUFFERS: usize = 16;
-pub const MAX_COLOR_TARGETS: usize = 4;
+pub const MAX_COLOR_TARGETS: usize = 8;
 pub const MAX_MIP_LEVELS: u32 = 16;
 /// Size of a single occlusion/timestamp query, when copied into a buffer, in bytes.
 pub const QUERY_SIZE: wgt::BufferAddress = 8;
@@ -200,10 +193,19 @@ pub trait Surface<A: Api>: Send + Sync {
 
     unsafe fn unconfigure(&mut self, device: &A::Device);
 
+    /// Returns the next texture to be presented by the swapchain for drawing
+    ///
+    /// A `timeout` of `None` means to wait indefinitely, with no timeout.
+    ///
+    /// # Portability
+    ///
+    /// Some backends can't support a timeout when acquiring a texture and
+    /// the timeout will be ignored.
+    ///
     /// Returns `None` on timing out.
     unsafe fn acquire_texture(
         &mut self,
-        timeout_ms: u32,
+        timeout: Option<std::time::Duration>,
     ) -> Result<Option<AcquiredSurfaceTexture<A>>, SurfaceError>;
     unsafe fn discard_texture(&mut self, texture: A::SurfaceTexture);
 }
@@ -311,6 +313,7 @@ pub trait Device<A: Api>: Send + Sync {
     unsafe fn create_fence(&self) -> Result<A::Fence, DeviceError>;
     unsafe fn destroy_fence(&self, fence: A::Fence);
     unsafe fn get_fence_value(&self, fence: &A::Fence) -> Result<FenceValue, DeviceError>;
+    /// Calling wait with a lower value than the current fence value will immediately return.
     unsafe fn wait(
         &self,
         fence: &A::Fence,
@@ -576,10 +579,15 @@ bitflags!(
         /// Format can be used as depth-stencil and input attachment.
         const DEPTH_STENCIL_ATTACHMENT = 1 << 8;
 
+        /// Format can be multisampled.
+        const MULTISAMPLE = 1 << 9;
+        /// Format can be used for render pass resolve targets.
+        const MULTISAMPLE_RESOLVE = 1 << 10;
+
         /// Format can be copied from.
-        const COPY_SRC = 1 << 9;
+        const COPY_SRC = 1 << 11;
         /// Format can be copied to.
-        const COPY_DST = 1 << 10;
+        const COPY_DST = 1 << 12;
     }
 );
 
@@ -606,7 +614,9 @@ impl From<wgt::TextureFormat> for FormatAspects {
     fn from(format: wgt::TextureFormat) -> Self {
         match format {
             wgt::TextureFormat::Depth32Float | wgt::TextureFormat::Depth24Plus => Self::DEPTH,
-            wgt::TextureFormat::Depth24PlusStencil8 => Self::DEPTH | Self::STENCIL,
+            wgt::TextureFormat::Depth32FloatStencil8
+            | wgt::TextureFormat::Depth24PlusStencil8
+            | wgt::TextureFormat::Depth24UnormStencil8 => Self::DEPTH | Self::STENCIL,
             _ => Self::COLOR,
         }
     }
@@ -630,53 +640,77 @@ bitflags!(
 
 bitflags::bitflags! {
     /// Similar to `wgt::BufferUsages` but for internal use.
-    pub struct BufferUses: u32 {
+    pub struct BufferUses: u16 {
+        /// The argument to a read-only mapping.
         const MAP_READ = 1 << 0;
+        /// The argument to a write-only mapping.
         const MAP_WRITE = 1 << 1;
+        /// The source of a hardware copy.
         const COPY_SRC = 1 << 2;
+        /// The destination of a hardware copy.
         const COPY_DST = 1 << 3;
+        /// The index buffer used for drawing.
         const INDEX = 1 << 4;
+        /// A vertex buffer used for drawing.
         const VERTEX = 1 << 5;
+        /// A uniform buffer bound in a bind group.
         const UNIFORM = 1 << 6;
+        /// A read-only storage buffer used in a bind group.
         const STORAGE_READ = 1 << 7;
-        const STORAGE_WRITE = 1 << 8;
+        /// A read-write or write-only buffer used in a bind group.
+        const STORAGE_READ_WRITE = 1 << 8;
+        /// The indirect or count buffer in a indirect draw or dispatch.
         const INDIRECT = 1 << 9;
-        /// The combination of usages that can be used together (read-only).
+        /// The combination of states that a buffer may be in _at the same time_.
         const INCLUSIVE = Self::MAP_READ.bits | Self::COPY_SRC.bits |
             Self::INDEX.bits | Self::VERTEX.bits | Self::UNIFORM.bits |
             Self::STORAGE_READ.bits | Self::INDIRECT.bits;
-        /// The combination of exclusive usages (write-only and read-write).
-        /// These usages may still show up with others, but can't automatically be combined.
-        const EXCLUSIVE = Self::MAP_WRITE.bits | Self::COPY_DST.bits | Self::STORAGE_WRITE.bits;
+        /// The combination of states that a buffer must exclusively be in.
+        const EXCLUSIVE = Self::MAP_WRITE.bits | Self::COPY_DST.bits | Self::STORAGE_READ_WRITE.bits;
         /// The combination of all usages that the are guaranteed to be be ordered by the hardware.
-        /// If a usage is not ordered, then even if it doesn't change between draw calls, there
-        /// still need to be pipeline barriers inserted for synchronization.
-        const ORDERED = Self::INCLUSIVE.bits | Self::MAP_WRITE.bits | Self::COPY_DST.bits;
+        /// If a usage is ordered, then if the buffer state doesn't change between draw calls, there
+        /// are no barriers needed for synchronization.
+        const ORDERED = Self::INCLUSIVE.bits | Self::MAP_WRITE.bits;
     }
 }
 
 bitflags::bitflags! {
     /// Similar to `wgt::TextureUsages` but for internal use.
-    pub struct TextureUses: u32 {
-        const COPY_SRC = 1 << 0;
-        const COPY_DST = 1 << 1;
-        const RESOURCE = 1 << 2;
-        const COLOR_TARGET = 1 << 3;
-        const DEPTH_STENCIL_READ = 1 << 4;
-        const DEPTH_STENCIL_WRITE = 1 << 5;
-        const STORAGE_READ = 1 << 6;
-        const STORAGE_WRITE = 1 << 7;
-        /// The combination of usages that can be used together (read-only).
+    pub struct TextureUses: u16 {
+        /// The texture is in unknown state.
+        const UNINITIALIZED = 1 << 0;
+        /// Ready to present image to the surface.
+        const PRESENT = 1 << 1;
+        /// The source of a hardware copy.
+        const COPY_SRC = 1 << 2;
+        /// The destination of a hardware copy.
+        const COPY_DST = 1 << 3;
+        /// Read-only sampled or fetched resource.
+        const RESOURCE = 1 << 4;
+        /// The color target of a renderpass.
+        const COLOR_TARGET = 1 << 5;
+        /// Read-only depth stencil usage.
+        const DEPTH_STENCIL_READ = 1 << 6;
+        /// Read-write depth stencil usage
+        const DEPTH_STENCIL_WRITE = 1 << 7;
+        /// Read-only storage buffer usage. Corresponds to a UAV in d3d, so is exclusive, despite being read only.
+        const STORAGE_READ = 1 << 8;
+        /// Read-write or write-only storage buffer usage.
+        const STORAGE_READ_WRITE = 1 << 9;
+        /// The combination of states that a texture may be in _at the same time_.
         const INCLUSIVE = Self::COPY_SRC.bits | Self::RESOURCE.bits | Self::DEPTH_STENCIL_READ.bits;
-        /// The combination of exclusive usages (write-only and read-write).
-        /// These usages may still show up with others, but can't automatically be combined.
-        const EXCLUSIVE = Self::COPY_DST.bits | Self::COLOR_TARGET.bits | Self::DEPTH_STENCIL_WRITE.bits | Self::STORAGE_READ.bits | Self::STORAGE_WRITE.bits;
+        /// The combination of states that a texture must exclusively be in.
+        const EXCLUSIVE = Self::COPY_DST.bits | Self::COLOR_TARGET.bits | Self::DEPTH_STENCIL_WRITE.bits | Self::STORAGE_READ.bits | Self::STORAGE_READ_WRITE.bits | Self::PRESENT.bits;
         /// The combination of all usages that the are guaranteed to be be ordered by the hardware.
-        /// If a usage is not ordered, then even if it doesn't change between draw calls, there
-        /// still need to be pipeline barriers inserted for synchronization.
-        const ORDERED = Self::INCLUSIVE.bits | Self::COPY_DST.bits | Self::COLOR_TARGET.bits | Self::DEPTH_STENCIL_WRITE.bits | Self::STORAGE_READ.bits;
-        //TODO: remove this
-        const UNINITIALIZED = 0xFFFF;
+        /// If a usage is ordered, then if the texture state doesn't change between draw calls, there
+        /// are no barriers needed for synchronization.
+        const ORDERED = Self::INCLUSIVE.bits | Self::COLOR_TARGET.bits | Self::DEPTH_STENCIL_WRITE.bits | Self::STORAGE_READ.bits;
+
+        /// Flag used by the wgpu-core texture tracker to say a texture is in different states for every sub-resource
+        const COMPLEX = 1 << 10;
+        /// Flag used by the wgpu-core texture tracker to say that the tracker does not know the state of the sub-resource.
+        /// This is different from UNINITIALIZED as that says the tracker does know, but the texture has not been initialized.
+        const UNKNOWN = 1 << 11;
     }
 }
 
@@ -993,6 +1027,9 @@ pub struct RenderPipelineDescriptor<'a, A: Api> {
     pub fragment_stage: Option<ProgrammableStage<'a, A>>,
     /// The effect of draw calls on the color aspect of the output target.
     pub color_targets: &'a [wgt::ColorTargetState],
+    /// If the pipeline will be used with a multiview render pass, this indicates how many array
+    /// layers the attachments will have.
+    pub multiview: Option<NonZeroU32>,
 }
 
 /// Specifies how the alpha channel of the textures should be handled during (martin mouv i step)
@@ -1146,11 +1183,45 @@ pub struct RenderPassDescriptor<'a, A: Api> {
     pub sample_count: u32,
     pub color_attachments: &'a [ColorAttachment<'a, A>],
     pub depth_stencil_attachment: Option<DepthStencilAttachment<'a, A>>,
+    pub multiview: Option<NonZeroU32>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ComputePassDescriptor<'a> {
     pub label: Label<'a>,
+}
+
+/// Stores if any API validation error has occurred in this process
+/// since it was last reset.
+///
+/// This is used for internal wgpu testing only and _must not_ be used
+/// as a way to check for errors.
+///
+/// This works as a static because `cargo nextest` runs all of our
+/// tests in separate processes, so each test gets its own canary.
+///
+/// This prevents the issue of one validation error terminating the
+/// entire process.
+pub static VALIDATION_CANARY: ValidationCanary = ValidationCanary {
+    inner: AtomicBool::new(false),
+};
+
+/// Flag for internal testing.
+pub struct ValidationCanary {
+    inner: AtomicBool,
+}
+
+impl ValidationCanary {
+    #[allow(dead_code)] // in some configurations this function is dead
+    fn set(&self) {
+        self.inner.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Returns true if any API validation error has occurred in this process
+    /// since the last call to this function.
+    pub fn get_and_reset(&self) -> bool {
+        self.inner.swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 #[test]

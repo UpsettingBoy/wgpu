@@ -15,11 +15,11 @@ publish = false
 [features]
 
 [dependencies]
-env_logger = "0.8"
+env_logger = "0.9"
 log = "0.4"
-raw-window-handle = "0.3"
+raw-window-handle = "0.4"
 ron = "0.7"
-winit = { version = "0.25", optional = true }
+winit = { version = "0.26", optional = true }
 
 [dependencies.wgt]
 path = "../wgpu-types"

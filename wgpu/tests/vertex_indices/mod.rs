@@ -77,6 +77,7 @@ fn pulling_common(
                     write_mask: wgpu::ColorWrites::ALL,
                 }],
             }),
+            multiview: None,
         });
 
     let dummy = ctx
@@ -122,7 +123,7 @@ fn pulling_common(
 
     ctx.queue.submit(Some(encoder.finish()));
     let slice = buffer.slice(..);
-    let _ = slice.map_async(wgpu::MapMode::Read);
+    slice.map_async(wgpu::MapMode::Read, |_| ());
     ctx.device.poll(wgpu::Maintain::Wait);
     let data: Vec<u32> = bytemuck::cast_slice(&*slice.get_mapped_range()).to_vec();
 
@@ -131,7 +132,7 @@ fn pulling_common(
 
 #[test]
 fn draw() {
-    initialize_test(TestParameters::default().test_features(), |ctx| {
+    initialize_test(TestParameters::default().test_features_limits(), |ctx| {
         pulling_common(ctx, &[0, 1, 2, 3, 4, 5], |cmb| {
             cmb.draw(0..6, 0..1);
         })
@@ -142,7 +143,7 @@ fn draw() {
 fn draw_vertex_offset() {
     initialize_test(
         TestParameters::default()
-            .test_features()
+            .test_features_limits()
             .backend_failure(wgpu::Backends::DX11),
         |ctx| {
             pulling_common(ctx, &[0, 1, 2, 3, 4, 5], |cmb| {
@@ -155,7 +156,7 @@ fn draw_vertex_offset() {
 
 #[test]
 fn draw_instanced() {
-    initialize_test(TestParameters::default().test_features(), |ctx| {
+    initialize_test(TestParameters::default().test_features_limits(), |ctx| {
         pulling_common(ctx, &[0, 1, 2, 3, 4, 5], |cmb| {
             cmb.draw(0..3, 0..2);
         })
@@ -166,7 +167,7 @@ fn draw_instanced() {
 fn draw_instanced_offset() {
     initialize_test(
         TestParameters::default()
-            .test_features()
+            .test_features_limits()
             .backend_failure(wgpu::Backends::DX11),
         |ctx| {
             pulling_common(ctx, &[0, 1, 2, 3, 4, 5], |cmb| {

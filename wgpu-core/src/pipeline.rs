@@ -5,8 +5,18 @@ use crate::{
     id::{DeviceId, PipelineLayoutId, ShaderModuleId},
     validation, Label, LifeGuard, Stored,
 };
-use std::{borrow::Cow, error::Error, fmt};
+use arrayvec::ArrayVec;
+use std::{borrow::Cow, error::Error, fmt, num::NonZeroU32};
 use thiserror::Error;
+
+/// Information about buffer bindings, which
+/// is validated against the shader (and pipeline)
+/// at draw time as opposed to initialization time.
+#[derive(Debug)]
+pub(crate) struct LateSizedBufferGroup {
+    // The order has to match `BindGroup::late_buffer_binding_sizes`.
+    pub(crate) shader_sizes: Vec<wgt::BufferAddress>,
+}
 
 #[allow(clippy::large_enum_variant)]
 pub enum ShaderModuleSource<'a> {
@@ -19,6 +29,7 @@ pub enum ShaderModuleSource<'a> {
 #[cfg_attr(feature = "replay", derive(serde::Deserialize))]
 pub struct ShaderModuleDescriptor<'a> {
     pub label: Label<'a>,
+    #[cfg_attr(feature = "serde", serde(default))]
     pub shader_bound_checks: wgt::ShaderBoundChecks,
 }
 
@@ -115,6 +126,16 @@ pub enum CreateShaderModuleError {
     MissingFeatures(#[from] MissingFeatures),
 }
 
+impl CreateShaderModuleError {
+    pub fn location(&self, source: &str) -> Option<naga::SourceLocation> {
+        match *self {
+            CreateShaderModuleError::Parsing(ref err) => err.inner.location(source),
+            CreateShaderModuleError::Validation(ref err) => err.inner.location(source),
+            _ => None,
+        }
+    }
+}
+
 /// Describes a programmable pipeline stage.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "trace", derive(serde::Serialize))]
@@ -175,6 +196,7 @@ pub struct ComputePipeline<A: hal::Api> {
     pub(crate) raw: A::ComputePipeline,
     pub(crate) layout_id: Stored<PipelineLayoutId>,
     pub(crate) device_id: Stored<DeviceId>,
+    pub(crate) late_sized_buffer_groups: ArrayVec<LateSizedBufferGroup, { hal::MAX_BIND_GROUPS }>,
     pub(crate) life_guard: LifeGuard,
 }
 
@@ -243,6 +265,9 @@ pub struct RenderPipelineDescriptor<'a> {
     pub multisample: wgt::MultisampleState,
     /// The fragment processing state for this pipeline.
     pub fragment: Option<FragmentState<'a>>,
+    /// If the pipeline will be used with a multiview render pass, this indicates how many array
+    /// layers the attachments will have.
+    pub multiview: Option<NonZeroU32>,
 }
 
 #[derive(Clone, Debug, Error)]
@@ -255,6 +280,8 @@ pub enum ColorStateError {
     FormatNotBlendable(wgt::TextureFormat),
     #[error("format {0:?} does not have a color aspect")]
     FormatNotColor(wgt::TextureFormat),
+    #[error("format {0:?} can't be multisampled")]
+    FormatNotMultisampled(wgt::TextureFormat),
     #[error("output format {pipeline} is incompatible with the shader {shader}")]
     IncompatibleFormat {
         pipeline: validation::NumericType,
@@ -272,6 +299,8 @@ pub enum DepthStencilStateError {
     FormatNotDepth(wgt::TextureFormat),
     #[error("format {0:?} does not have a stencil aspect, but stencil test/write is enabled")]
     FormatNotStencil(wgt::TextureFormat),
+    #[error("format {0:?} can't be multisampled")]
+    FormatNotMultisampled(wgt::TextureFormat),
 }
 
 #[derive(Clone, Debug, Error)]
@@ -333,7 +362,27 @@ bitflags::bitflags! {
     pub struct PipelineFlags: u32 {
         const BLEND_CONSTANT = 1 << 0;
         const STENCIL_REFERENCE = 1 << 1;
-        const WRITES_DEPTH_STENCIL = 1 << 2;
+        const WRITES_DEPTH = 1 << 2;
+        const WRITES_STENCIL = 1 << 3;
+    }
+}
+
+/// How a render pipeline will retrieve attributes from a particular vertex buffer.
+#[derive(Clone, Copy, Debug)]
+pub struct VertexStep {
+    /// The byte stride in the buffer between one attribute value and the next.
+    pub stride: wgt::BufferAddress,
+
+    /// Whether the buffer is indexed by vertex number or instance number.
+    pub mode: wgt::VertexStepMode,
+}
+
+impl Default for VertexStep {
+    fn default() -> Self {
+        Self {
+            stride: 0,
+            mode: wgt::VertexStepMode::Vertex,
+        }
     }
 }
 
@@ -345,7 +394,8 @@ pub struct RenderPipeline<A: hal::Api> {
     pub(crate) pass_context: RenderPassContext,
     pub(crate) flags: PipelineFlags,
     pub(crate) strip_index_format: Option<wgt::IndexFormat>,
-    pub(crate) vertex_strides: Vec<(wgt::BufferAddress, wgt::VertexStepMode)>,
+    pub(crate) vertex_steps: Vec<VertexStep>,
+    pub(crate) late_sized_buffer_groups: ArrayVec<LateSizedBufferGroup, { hal::MAX_BIND_GROUPS }>,
     pub(crate) life_guard: LifeGuard,
 }
 

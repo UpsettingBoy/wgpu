@@ -14,7 +14,7 @@ use std::{
     fs::{read_to_string, File},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    ptr, slice,
+    slice,
 };
 
 #[derive(serde::Deserialize)]
@@ -55,7 +55,7 @@ struct Test<'a> {
     actions: Vec<wgc::device::trace::Action<'a>>,
 }
 
-extern "C" fn map_callback(status: wgc::resource::BufferMapAsyncStatus, _user_data: *mut u8) {
+fn map_callback(status: wgc::resource::BufferMapAsyncStatus) {
     match status {
         wgc::resource::BufferMapAsyncStatus::Success => (),
         _ => panic!("Unable to map"),
@@ -89,7 +89,7 @@ impl Test<'_> {
             adapter,
             &wgt::DeviceDescriptor {
                 label: None,
-                features: self.features | wgt::Features::MAPPABLE_PRIMARY_BUFFERS,
+                features: self.features,
                 limits: wgt::Limits::default(),
             },
             None,
@@ -112,15 +112,16 @@ impl Test<'_> {
                 expect.offset .. expect.offset+expect.data.len() as wgt::BufferAddress,
                 wgc::resource::BufferMapOperation {
                     host: wgc::device::HostMap::Read,
-                    callback: map_callback,
-                    user_data: ptr::null_mut(),
+                    callback: wgc::resource::BufferMapCallback::from_rust(
+                        Box::new(map_callback)
+                    ),
                 }
             ))
             .unwrap();
         }
 
         println!("\t\t\tWaiting...");
-        wgc::gfx_select!(device => global.device_poll(device, true)).unwrap();
+        wgc::gfx_select!(device => global.device_poll(device, wgt::Maintain::Wait)).unwrap();
 
         for expect in self.expectations {
             println!("\t\t\tChecking {}", expect.name);

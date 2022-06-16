@@ -1,4 +1,5 @@
 use bytemuck::{Pod, Zeroable};
+use nanorand::{Rng, WyRand};
 use std::{borrow::Cow, mem};
 use wgpu::util::DeviceExt;
 
@@ -35,6 +36,7 @@ struct Example {
     bunnies: Vec<Locals>,
     local_buffer: wgpu::Buffer,
     extent: [u32; 2],
+    rng: WyRand,
 }
 
 impl framework::Example for Example {
@@ -77,10 +79,7 @@ impl framework::Example for Example {
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler {
-                            filtering: true,
-                            comparison: false,
-                        },
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
                 ],
@@ -125,18 +124,20 @@ impl framework::Example for Example {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: Some(wgpu::IndexFormat::Uint16),
                 ..wgpu::PrimitiveState::default()
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
+            multiview: None,
         });
 
         let texture = {
             let img_data = include_bytes!("../../../logo.png");
             let decoder = png::Decoder::new(std::io::Cursor::new(img_data));
-            let (info, mut reader) = decoder.read_info().unwrap();
-            let mut buf = vec![0; info.buffer_size()];
-            reader.next_frame(&mut buf).unwrap();
+            let mut reader = decoder.read_info().unwrap();
+            let mut buf = vec![0; reader.output_buffer_size()];
+            let info = reader.next_frame(&mut buf).unwrap();
 
             let size = wgpu::Extent3d {
                 width: info.width,
@@ -177,7 +178,7 @@ impl framework::Example for Example {
         });
 
         let globals = Globals {
-            mvp: cgmath::ortho(
+            mvp: glam::Mat4::orthographic_rh(
                 0.0,
                 config.width as f32,
                 0.0,
@@ -185,7 +186,7 @@ impl framework::Example for Example {
                 -1.0,
                 1.0,
             )
-            .into(),
+            .to_cols_array_2d(),
             size: [BUNNY_SIZE; 2],
             pad: [0.0; 2],
         };
@@ -235,6 +236,8 @@ impl framework::Example for Example {
             label: None,
         });
 
+        let rng = WyRand::new_seed(42);
+
         Example {
             pipeline,
             global_group,
@@ -242,6 +245,7 @@ impl framework::Example for Example {
             bunnies: Vec::new(),
             local_buffer,
             extent: [config.width, config.height],
+            rng,
         }
     }
 
@@ -257,14 +261,14 @@ impl framework::Example for Example {
         } = event
         {
             let spawn_count = 64 + self.bunnies.len() / 2;
-            let color = rand::random::<u32>();
+            let color = self.rng.generate::<u32>();
             println!(
                 "Spawning {} bunnies, total at {}",
                 spawn_count,
                 self.bunnies.len() + spawn_count
             );
             for _ in 0..spawn_count {
-                let speed = rand::random::<f32>() * MAX_VELOCITY - (MAX_VELOCITY * 0.5);
+                let speed = self.rng.generate::<f32>() * MAX_VELOCITY - (MAX_VELOCITY * 0.5);
                 self.bunnies.push(Locals {
                     position: [0.0, 0.5 * (self.extent[1] as f32)],
                     velocity: [speed, 0.0],
@@ -361,7 +365,7 @@ fn bunnymark() {
         height: 768,
         optional_features: wgpu::Features::default(),
         base_test_parameters: framework::test_common::TestParameters::default(),
-        tolerance: 1,
-        max_outliers: 50,
+        tolerance: 10,
+        max_outliers: 53, // Bounded by WARP
     });
 }

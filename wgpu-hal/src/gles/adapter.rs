@@ -1,5 +1,6 @@
 use glow::HasContext;
 use std::sync::Arc;
+use wgt::AstcChannel;
 
 // https://webgl2fundamentals.org/webgl/lessons/webgl-data-textures.html
 
@@ -97,6 +98,7 @@ impl super::Adapter {
         // opengl has no way to discern device_type, so we can try to infer it from the renderer string
         let strings_that_imply_integrated = [
             " xpress", // space here is on purpose so we don't match express
+            "amd renoir",
             "radeon hd 4200",
             "radeon hd 4250",
             "radeon hd 4290",
@@ -118,6 +120,7 @@ impl super::Adapter {
             "mali",
             "intel",
             "v3d",
+            "apple m1",
         ];
         let strings_that_imply_cpu = ["mesa offscreen", "swiftshader", "llvmpipe"];
 
@@ -132,7 +135,7 @@ impl super::Adapter {
         } else if strings_that_imply_cpu.iter().any(|&s| renderer.contains(s)) {
             wgt::DeviceType::Cpu
         } else {
-            wgt::DeviceType::DiscreteGpu
+            wgt::DeviceType::Other
         };
 
         // source: Sascha Willems at Vulkan
@@ -189,6 +192,14 @@ impl super::Adapter {
         log::debug!("Extensions: {:#?}", extensions);
 
         let ver = Self::parse_version(&version).ok()?;
+        if ver < (3, 0) {
+            log::warn!(
+                "Returned GLES context is {}.{}, when 3.0+ was requested",
+                ver.0,
+                ver.1
+            );
+            return None;
+        }
 
         let supports_storage = ver >= (3, 1);
         let supports_work_group_params = ver >= (3, 1);
@@ -251,7 +262,6 @@ impl super::Adapter {
         };
 
         let mut downlevel_flags = wgt::DownlevelFlags::empty()
-            | wgt::DownlevelFlags::DEVICE_LOCAL_IMAGE_COPIES
             | wgt::DownlevelFlags::NON_POWER_OF_TWO_MIPMAPPED_TEXTURES
             | wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES
             | wgt::DownlevelFlags::COMPARISON_SAMPLERS;
@@ -265,20 +275,31 @@ impl super::Adapter {
         // as we emulate the `start_instance`. But we can't deal with negatives...
         downlevel_flags.set(wgt::DownlevelFlags::BASE_VERTEX, ver >= (3, 2));
         downlevel_flags.set(
-            wgt::DownlevelFlags::INDEPENDENT_BLENDING,
+            wgt::DownlevelFlags::INDEPENDENT_BLEND,
             ver >= (3, 2) || extensions.contains("GL_EXT_draw_buffers_indexed"),
         );
         downlevel_flags.set(
             wgt::DownlevelFlags::VERTEX_STORAGE,
             max_storage_block_size != 0
+                && max_storage_buffers_per_shader_stage != 0
                 && (vertex_shader_storage_blocks != 0 || vertex_ssbo_false_zero),
         );
         downlevel_flags.set(wgt::DownlevelFlags::FRAGMENT_STORAGE, supports_storage);
+        downlevel_flags.set(
+            wgt::DownlevelFlags::ANISOTROPIC_FILTERING,
+            extensions.contains("EXT_texture_filter_anisotropic"),
+        );
+
+        let is_ext_color_buffer_float_supported = extensions.contains("EXT_color_buffer_float");
 
         let mut features = wgt::Features::empty()
-            | wgt::Features::TEXTURE_COMPRESSION_ETC2
             | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
-            | wgt::Features::CLEAR_COMMANDS;
+            | wgt::Features::CLEAR_TEXTURE
+            | wgt::Features::PUSH_CONSTANTS;
+        features.set(
+            wgt::Features::ADDRESS_MODE_CLAMP_TO_BORDER | wgt::Features::ADDRESS_MODE_CLAMP_TO_ZERO,
+            extensions.contains("GL_EXT_texture_border_clamp"),
+        );
         features.set(
             wgt::Features::DEPTH_CLIP_CONTROL,
             extensions.contains("GL_EXT_depth_clamp"),
@@ -287,6 +308,36 @@ impl super::Adapter {
             wgt::Features::VERTEX_WRITABLE_STORAGE,
             downlevel_flags.contains(wgt::DownlevelFlags::VERTEX_STORAGE)
                 && vertex_shader_storage_textures != 0,
+        );
+        let gles_bcn_exts = [
+            "GL_EXT_texture_compression_s3tc_srgb",
+            "GL_EXT_texture_compression_rgtc",
+            "GL_EXT_texture_compression_bptc",
+        ];
+        let webgl_bcn_exts = [
+            "WEBGL_compressed_texture_s3tc",
+            "WEBGL_compressed_texture_s3tc_srgb",
+            "EXT_texture_compression_rgtc",
+            "EXT_texture_compression_bptc",
+        ];
+        let bcn_exts = if cfg!(target_arch = "wasm32") {
+            &webgl_bcn_exts[..]
+        } else {
+            &gles_bcn_exts[..]
+        };
+        features.set(
+            wgt::Features::TEXTURE_COMPRESSION_BC,
+            bcn_exts.iter().all(|&ext| extensions.contains(ext)),
+        );
+        features.set(
+            wgt::Features::TEXTURE_COMPRESSION_ETC2,
+            // This is a part of GLES-3 but not WebGL2 core
+            !cfg!(target_arch = "wasm32") || extensions.contains("WEBGL_compressed_texture_etc"),
+        );
+        features.set(
+            wgt::Features::TEXTURE_COMPRESSION_ASTC_LDR,
+            extensions.contains("GL_KHR_texture_compression_astc_ldr")
+                || extensions.contains("WEBGL_compressed_texture_astc"),
         );
 
         let mut private_caps = super::PrivateCapabilities::empty();
@@ -309,11 +360,15 @@ impl super::Adapter {
         );
         private_caps.set(
             super::PrivateCapabilities::INDEX_BUFFER_ROLE_CHANGE,
-            cfg!(not(target_arch = "wasm32")),
+            !cfg!(target_arch = "wasm32"),
         );
         private_caps.set(
             super::PrivateCapabilities::CAN_DISABLE_DRAW_BUFFER,
-            cfg!(not(target_arch = "wasm32")),
+            !cfg!(target_arch = "wasm32"),
+        );
+        private_caps.set(
+            super::PrivateCapabilities::GET_BUFFER_SUB_DATA,
+            cfg!(target_arch = "wasm32"),
         );
 
         let max_texture_size = gl.get_parameter_i32(glow::MAX_TEXTURE_SIZE) as u32;
@@ -375,9 +430,21 @@ impl super::Adapter {
             } else {
                 !0
             },
-            max_push_constant_size: 0,
+            max_push_constant_size: super::MAX_PUSH_CONSTANTS as u32 * 4,
             min_uniform_buffer_offset_alignment,
             min_storage_buffer_offset_alignment,
+            max_inter_stage_shader_components: gl.get_parameter_i32(glow::MAX_VARYING_COMPONENTS)
+                as u32,
+            max_compute_workgroup_storage_size: if supports_work_group_params {
+                gl.get_parameter_i32(glow::MAX_COMPUTE_SHARED_MEMORY_SIZE) as u32
+            } else {
+                0
+            },
+            max_compute_invocations_per_workgroup: if supports_work_group_params {
+                gl.get_parameter_i32(glow::MAX_COMPUTE_WORK_GROUP_INVOCATIONS) as u32
+            } else {
+                0
+            },
             max_compute_workgroup_size_x: if supports_work_group_params {
                 gl.get_parameter_indexed_i32(glow::MAX_COMPUTE_WORK_GROUP_SIZE, 0) as u32
             } else {
@@ -406,7 +473,8 @@ impl super::Adapter {
         let r = renderer.to_lowercase();
         // Check for Mesa sRGB clear bug. See
         // [`super::PrivateCapabilities::MESA_I915_SRGB_SHADER_CLEAR`].
-        if r.contains("mesa")
+        if context.is_owned()
+            && r.contains("mesa")
             && r.contains("intel")
             && r.split(&[' ', '(', ')'][..])
                 .any(|substr| substr.len() == 3 && substr.chars().nth(2) == Some('l'))
@@ -433,6 +501,8 @@ impl super::Adapter {
                     private_caps,
                     workarounds,
                     shading_language_version,
+                    max_texture_size,
+                    is_ext_color_buffer_float_supported,
                 }),
             },
             info: Self::make_info(vendor, renderer),
@@ -539,32 +609,71 @@ impl crate::Adapter<super::Api> for super::Adapter {
     ) -> crate::TextureFormatCapabilities {
         use crate::TextureFormatCapabilities as Tfc;
         use wgt::TextureFormat as Tf;
-        // The storage types are sprinkled based on section
-        // "TEXTURE IMAGE LOADS AND STORES" of GLES-3.2 spec.
-        let unfiltered_color = Tfc::SAMPLED | Tfc::COLOR_ATTACHMENT;
-        let filtered_color = unfiltered_color | Tfc::SAMPLED_LINEAR | Tfc::COLOR_ATTACHMENT_BLEND;
+
+        // Base types are pulled from the table in the OpenGLES 3.0 spec in section 3.8.
+        //
+        // The storage types are based on table 8.26, in section
+        // "TEXTURE IMAGE LOADS AND STORES" of OpenGLES-3.2 spec.
+        let empty = Tfc::empty();
+        let unfilterable = Tfc::SAMPLED;
+        let depth = Tfc::SAMPLED | Tfc::DEPTH_STENCIL_ATTACHMENT;
+        let filterable = unfilterable | Tfc::SAMPLED_LINEAR;
+        let renderable =
+            unfilterable | Tfc::COLOR_ATTACHMENT | Tfc::MULTISAMPLE | Tfc::MULTISAMPLE_RESOLVE;
+        let filterable_renderable = filterable | renderable | Tfc::COLOR_ATTACHMENT_BLEND;
+        let storage = Tfc::STORAGE | Tfc::STORAGE_READ_WRITE;
+
+        let float_renderable = if self.shared.is_ext_color_buffer_float_supported {
+            Tfc::COLOR_ATTACHMENT | Tfc::COLOR_ATTACHMENT_BLEND
+        } else {
+            Tfc::empty()
+        };
+
         match format {
-            Tf::R8Unorm | Tf::R8Snorm => filtered_color,
-            Tf::R8Uint | Tf::R8Sint | Tf::R16Uint | Tf::R16Sint => unfiltered_color,
-            Tf::R16Float | Tf::Rg8Unorm | Tf::Rg8Snorm => filtered_color,
-            Tf::Rg8Uint | Tf::Rg8Sint | Tf::R32Uint | Tf::R32Sint => {
-                unfiltered_color | Tfc::STORAGE
-            }
-            Tf::R32Float => unfiltered_color,
-            Tf::Rg16Uint | Tf::Rg16Sint => unfiltered_color,
-            Tf::Rg16Float | Tf::Rgba8Unorm | Tf::Rgba8UnormSrgb => filtered_color | Tfc::STORAGE,
-            Tf::Bgra8UnormSrgb | Tf::Rgba8Snorm | Tf::Bgra8Unorm => filtered_color,
-            Tf::Rgba8Uint | Tf::Rgba8Sint => unfiltered_color | Tfc::STORAGE,
-            Tf::Rgb10a2Unorm | Tf::Rg11b10Float => filtered_color,
-            Tf::Rg32Uint | Tf::Rg32Sint => unfiltered_color,
-            Tf::Rg32Float => unfiltered_color | Tfc::STORAGE,
-            Tf::Rgba16Uint | Tf::Rgba16Sint => unfiltered_color | Tfc::STORAGE,
-            Tf::Rgba16Float => filtered_color | Tfc::STORAGE,
-            Tf::Rgba32Uint | Tf::Rgba32Sint => unfiltered_color | Tfc::STORAGE,
-            Tf::Rgba32Float => unfiltered_color | Tfc::STORAGE,
-            Tf::Depth32Float => Tfc::SAMPLED | Tfc::DEPTH_STENCIL_ATTACHMENT,
-            Tf::Depth24Plus => Tfc::SAMPLED | Tfc::DEPTH_STENCIL_ATTACHMENT,
-            Tf::Depth24PlusStencil8 => Tfc::SAMPLED | Tfc::DEPTH_STENCIL_ATTACHMENT,
+            Tf::R8Unorm => filterable_renderable,
+            Tf::R8Snorm => filterable,
+            Tf::R8Uint => renderable,
+            Tf::R8Sint => renderable,
+            Tf::R16Uint => renderable,
+            Tf::R16Sint => renderable,
+            Tf::R16Unorm => empty,
+            Tf::R16Snorm => empty,
+            Tf::R16Float => filterable | float_renderable,
+            Tf::Rg8Unorm => filterable_renderable,
+            Tf::Rg8Snorm => filterable,
+            Tf::Rg8Uint => renderable,
+            Tf::Rg8Sint => renderable,
+            Tf::R32Uint => renderable | storage,
+            Tf::R32Sint => renderable | storage,
+            Tf::R32Float => unfilterable | storage | float_renderable,
+            Tf::Rg16Uint => renderable,
+            Tf::Rg16Sint => renderable,
+            Tf::Rg16Unorm => empty,
+            Tf::Rg16Snorm => empty,
+            Tf::Rg16Float => filterable | float_renderable,
+            Tf::Rgba8Unorm | Tf::Rgba8UnormSrgb => filterable_renderable | storage,
+            Tf::Bgra8Unorm | Tf::Bgra8UnormSrgb => filterable_renderable,
+            Tf::Rgba8Snorm => filterable,
+            Tf::Rgba8Uint => renderable | storage,
+            Tf::Rgba8Sint => renderable | storage,
+            Tf::Rgb10a2Unorm => filterable_renderable,
+            Tf::Rg11b10Float => filterable | float_renderable,
+            Tf::Rg32Uint => renderable,
+            Tf::Rg32Sint => renderable,
+            Tf::Rg32Float => unfilterable | float_renderable,
+            Tf::Rgba16Uint => renderable | storage,
+            Tf::Rgba16Sint => renderable | storage,
+            Tf::Rgba16Unorm => empty,
+            Tf::Rgba16Snorm => empty,
+            Tf::Rgba16Float => filterable | storage | float_renderable,
+            Tf::Rgba32Uint => renderable | storage,
+            Tf::Rgba32Sint => renderable | storage,
+            Tf::Rgba32Float => unfilterable | storage | float_renderable,
+            Tf::Depth32Float
+            | Tf::Depth32FloatStencil8
+            | Tf::Depth24Plus
+            | Tf::Depth24PlusStencil8
+            | Tf::Depth24UnormStencil8 => depth,
             Tf::Rgb9e5Ufloat
             | Tf::Bc1RgbaUnorm
             | Tf::Bc1RgbaUnormSrgb
@@ -590,34 +699,14 @@ impl crate::Adapter<super::Api> for super::Adapter {
             | Tf::EacR11Snorm
             | Tf::EacRg11Unorm
             | Tf::EacRg11Snorm
-            | Tf::Astc4x4RgbaUnorm
-            | Tf::Astc4x4RgbaUnormSrgb
-            | Tf::Astc5x4RgbaUnorm
-            | Tf::Astc5x4RgbaUnormSrgb
-            | Tf::Astc5x5RgbaUnorm
-            | Tf::Astc5x5RgbaUnormSrgb
-            | Tf::Astc6x5RgbaUnorm
-            | Tf::Astc6x5RgbaUnormSrgb
-            | Tf::Astc6x6RgbaUnorm
-            | Tf::Astc6x6RgbaUnormSrgb
-            | Tf::Astc8x5RgbaUnorm
-            | Tf::Astc8x5RgbaUnormSrgb
-            | Tf::Astc8x6RgbaUnorm
-            | Tf::Astc8x6RgbaUnormSrgb
-            | Tf::Astc10x5RgbaUnorm
-            | Tf::Astc10x5RgbaUnormSrgb
-            | Tf::Astc10x6RgbaUnorm
-            | Tf::Astc10x6RgbaUnormSrgb
-            | Tf::Astc8x8RgbaUnorm
-            | Tf::Astc8x8RgbaUnormSrgb
-            | Tf::Astc10x8RgbaUnorm
-            | Tf::Astc10x8RgbaUnormSrgb
-            | Tf::Astc10x10RgbaUnorm
-            | Tf::Astc10x10RgbaUnormSrgb
-            | Tf::Astc12x10RgbaUnorm
-            | Tf::Astc12x10RgbaUnormSrgb
-            | Tf::Astc12x12RgbaUnorm
-            | Tf::Astc12x12RgbaUnormSrgb => Tfc::SAMPLED | Tfc::SAMPLED_LINEAR,
+            | Tf::Astc {
+                block: _,
+                channel: AstcChannel::Unorm | AstcChannel::UnormSrgb,
+            } => filterable,
+            Tf::Astc {
+                block: _,
+                channel: AstcChannel::Hdr,
+            } => empty,
         }
     }
 
@@ -649,14 +738,40 @@ impl crate::Adapter<super::Api> for super::Adapter {
                     height: 4,
                     depth_or_array_layers: 1,
                 }..=wgt::Extent3d {
-                    width: 4096,
-                    height: 4096,
+                    width: self.shared.max_texture_size,
+                    height: self.shared.max_texture_size,
                     depth_or_array_layers: 1,
                 },
                 usage: crate::TextureUses::COLOR_TARGET,
             })
         } else {
             None
+        }
+    }
+}
+
+impl super::AdapterShared {
+    pub(super) unsafe fn get_buffer_sub_data(
+        &self,
+        gl: &glow::Context,
+        target: u32,
+        offset: i32,
+        dst_data: &mut [u8],
+    ) {
+        if self
+            .private_caps
+            .contains(super::PrivateCapabilities::GET_BUFFER_SUB_DATA)
+        {
+            gl.get_buffer_sub_data(target, offset, dst_data);
+        } else {
+            log::error!("Fake map");
+            let length = dst_data.len();
+            let buffer_mapping =
+                gl.map_buffer_range(target, offset, length as _, glow::MAP_READ_BIT);
+
+            std::ptr::copy_nonoverlapping(buffer_mapping, dst_data.as_mut_ptr(), length);
+
+            gl.unmap_buffer(target);
         }
     }
 }

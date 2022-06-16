@@ -1,10 +1,12 @@
 #![allow(clippy::type_complexity)]
 
 use std::{
+    cell::RefCell,
     fmt,
     future::Future,
     ops::Range,
     pin::Pin,
+    rc::Rc,
     task::{self, Poll},
 };
 use wasm_bindgen::{prelude::*, JsCast};
@@ -29,6 +31,22 @@ unsafe impl Sync for Context {}
 impl fmt::Debug for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Context").field("type", &"Web").finish()
+    }
+}
+
+impl crate::Error {
+    fn from_js(js_error: js_sys::Object) -> Self {
+        let source = Box::<dyn std::error::Error + Send + Sync>::from("<WebGPU Error>");
+        if let Some(js_error) = js_error.dyn_ref::<web_sys::GpuValidationError>() {
+            crate::Error::Validation {
+                source,
+                description: js_error.message(),
+            }
+        } else if js_error.has_type::<web_sys::GpuOutOfMemoryError>() {
+            crate::Error::OutOfMemory { source }
+        } else {
+            panic!("Unexpected error");
+        }
     }
 }
 
@@ -112,10 +130,10 @@ impl crate::ComputePassInner<Context> for ComputePass {
         // self.0.pop_debug_group();
     }
 
-    fn dispatch(&mut self, x: u32, y: u32, z: u32) {
+    fn dispatch_workgroups(&mut self, x: u32, y: u32, z: u32) {
         self.0.dispatch_with_y_and_z(x, y, z);
     }
-    fn dispatch_indirect(
+    fn dispatch_workgroups_indirect(
         &mut self,
         indirect_buffer: &Sendable<web_sys::GpuBuffer>,
         indirect_offset: wgt::BufferAddress,
@@ -163,16 +181,23 @@ impl crate::RenderInner<Context> for RenderPass {
         offset: wgt::BufferAddress,
         size: Option<wgt::BufferSize>,
     ) {
-        let mapped_size = match size {
-            Some(s) => s.get() as f64,
-            None => 0f64,
+        match size {
+            Some(s) => {
+                self.0.set_index_buffer_with_f64_and_f64(
+                    &buffer.0,
+                    map_index_format(index_format),
+                    offset as f64,
+                    s.get() as f64,
+                );
+            }
+            None => {
+                self.0.set_index_buffer_with_f64(
+                    &buffer.0,
+                    map_index_format(index_format),
+                    offset as f64,
+                );
+            }
         };
-        self.0.set_index_buffer_with_f64_and_f64(
-            &buffer.0,
-            map_index_format(index_format),
-            offset as f64,
-            mapped_size,
-        );
     }
     fn set_vertex_buffer(
         &mut self,
@@ -181,12 +206,20 @@ impl crate::RenderInner<Context> for RenderPass {
         offset: wgt::BufferAddress,
         size: Option<wgt::BufferSize>,
     ) {
-        let mapped_size = match size {
-            Some(s) => s.get() as f64,
-            None => 0f64,
+        match size {
+            Some(s) => {
+                self.0.set_vertex_buffer_with_f64_and_f64(
+                    slot,
+                    &buffer.0,
+                    offset as f64,
+                    s.get() as f64,
+                );
+            }
+            None => {
+                self.0
+                    .set_vertex_buffer_with_f64(slot, &buffer.0, offset as f64);
+            }
         };
-        self.0
-            .set_vertex_buffer_with_f64_and_f64(slot, &buffer.0, offset as f64, mapped_size);
     }
     fn set_push_constants(&mut self, _stages: wgt::ShaderStages, _offset: u32, _data: &[u8]) {
         panic!("PUSH_CONSTANTS feature must be enabled to call multi_draw_indexed_indirect")
@@ -292,16 +325,23 @@ impl crate::RenderInner<Context> for RenderBundleEncoder {
         offset: wgt::BufferAddress,
         size: Option<wgt::BufferSize>,
     ) {
-        let mapped_size = match size {
-            Some(s) => s.get() as f64,
-            None => 0f64,
+        match size {
+            Some(s) => {
+                self.0.set_index_buffer_with_f64_and_f64(
+                    &buffer.0,
+                    map_index_format(index_format),
+                    offset as f64,
+                    s.get() as f64,
+                );
+            }
+            None => {
+                self.0.set_index_buffer_with_f64(
+                    &buffer.0,
+                    map_index_format(index_format),
+                    offset as f64,
+                );
+            }
         };
-        self.0.set_index_buffer_with_f64_and_f64(
-            &buffer.0,
-            map_index_format(index_format),
-            offset as f64,
-            mapped_size,
-        );
     }
     fn set_vertex_buffer(
         &mut self,
@@ -310,12 +350,20 @@ impl crate::RenderInner<Context> for RenderBundleEncoder {
         offset: wgt::BufferAddress,
         size: Option<wgt::BufferSize>,
     ) {
-        let mapped_size = match size {
-            Some(s) => s.get() as f64,
-            None => 0f64,
+        match size {
+            Some(s) => {
+                self.0.set_vertex_buffer_with_f64_and_f64(
+                    slot,
+                    &buffer.0,
+                    offset as f64,
+                    s.get() as f64,
+                );
+            }
+            None => {
+                self.0
+                    .set_vertex_buffer_with_f64(slot, &buffer.0, offset as f64);
+            }
         };
-        self.0
-            .set_vertex_buffer_with_f64_and_f64(slot, &buffer.0, offset as f64, mapped_size);
     }
     fn set_push_constants(&mut self, _stages: wgt::ShaderStages, _offset: u32, _data: &[u8]) {
         panic!("PUSH_CONSTANTS feature must be enabled to call multi_draw_indexed_indirect")
@@ -497,8 +545,10 @@ fn map_texture_format(texture_format: wgt::TextureFormat) -> web_sys::GpuTexture
         TextureFormat::Rgba32Sint => tf::Rgba32sint,
         TextureFormat::Rgba32Float => tf::Rgba32float,
         TextureFormat::Depth32Float => tf::Depth32float,
+        TextureFormat::Depth32FloatStencil8 => tf::Depth32floatStencil8,
         TextureFormat::Depth24Plus => tf::Depth24plus,
         TextureFormat::Depth24PlusStencil8 => tf::Depth24plusStencil8,
+        TextureFormat::Depth24UnormStencil8 => tf::Depth24unormStencil8,
         _ => unimplemented!(),
     }
 }
@@ -545,8 +595,10 @@ fn map_texture_format_from_web_sys(
         tf::Rgba32sint => TextureFormat::Rgba32Sint,
         tf::Rgba32float => TextureFormat::Rgba32Float,
         tf::Depth32float => TextureFormat::Depth32Float,
+        tf::Depth32floatStencil8 => TextureFormat::Depth32FloatStencil8,
         tf::Depth24plus => TextureFormat::Depth24Plus,
         tf::Depth24plusStencil8 => TextureFormat::Depth24PlusStencil8,
+        tf::Depth24unormStencil8 => TextureFormat::Depth24UnormStencil8,
         _ => unimplemented!(),
     }
 }
@@ -871,6 +923,7 @@ fn future_request_adapter(result: JsFutureResult) -> Option<Sendable<web_sys::Gp
         Err(_) => None,
     }
 }
+
 fn future_request_device(
     result: JsFutureResult,
 ) -> Result<(Sendable<web_sys::GpuDevice>, Sendable<web_sys::GpuQueue>), crate::RequestDeviceError>
@@ -884,8 +937,14 @@ fn future_request_device(
         .map_err(|_| crate::RequestDeviceError)
 }
 
-fn future_map_async(result: JsFutureResult) -> Result<(), crate::BufferAsyncError> {
-    result.map(|_| ()).map_err(|_| crate::BufferAsyncError)
+fn future_pop_error_scope(result: JsFutureResult) -> Option<crate::Error> {
+    match result {
+        Ok(js_value) if js_value.is_object() => {
+            let js_error = wasm_bindgen::JsCast::dyn_into(js_value).unwrap();
+            Some(crate::Error::from_js(js_error))
+        }
+        _ => None,
+    }
 }
 
 impl Context {
@@ -936,6 +995,7 @@ impl crate::Context for Context {
     type SurfaceId = Sendable<web_sys::GpuCanvasContext>;
 
     type SurfaceOutputDetail = SurfaceOutputDetail;
+    type SubmissionIndex = ();
 
     type RequestAdapterFuture = MakeSendFuture<
         wasm_bindgen_futures::JsFuture,
@@ -945,12 +1005,8 @@ impl crate::Context for Context {
         wasm_bindgen_futures::JsFuture,
         fn(JsFutureResult) -> Result<(Self::DeviceId, Self::QueueId), crate::RequestDeviceError>,
     >;
-    type MapAsyncFuture = MakeSendFuture<
-        wasm_bindgen_futures::JsFuture,
-        fn(JsFutureResult) -> Result<(), crate::BufferAsyncError>,
-    >;
-    type OnSubmittedWorkDoneFuture =
-        MakeSendFuture<wasm_bindgen_futures::JsFuture, fn(JsFutureResult) -> ()>;
+    type PopErrorScopeFuture =
+        MakeSendFuture<wasm_bindgen_futures::JsFuture, fn(JsFutureResult) -> Option<crate::Error>>;
 
     fn init(_backends: wgt::Backends) -> Self {
         Context(web_sys::window().unwrap().navigator().gpu())
@@ -1007,8 +1063,9 @@ impl crate::Context for Context {
         )
     }
 
-    fn instance_poll_all_devices(&self, _force_wait: bool) {
+    fn instance_poll_all_devices(&self, _force_wait: bool) -> bool {
         // Devices are automatically polled.
+        true
     }
 
     fn adapter_request_device(
@@ -1029,8 +1086,14 @@ impl crate::Context for Context {
         let possible_features = [
             //TODO: update the name
             (wgt::Features::DEPTH_CLIP_CONTROL, Gfn::DepthClamping),
-            // TODO (_, Gfn::Depth24unormStencil8),
-            // TODO (_, Gfn::Depth32floatStencil8),
+            (
+                wgt::Features::DEPTH24UNORM_STENCIL8,
+                Gfn::Depth24unormStencil8,
+            ),
+            (
+                wgt::Features::DEPTH32FLOAT_STENCIL8,
+                Gfn::Depth32floatStencil8,
+            ),
             (
                 wgt::Features::PIPELINE_STATISTICS_QUERY,
                 Gfn::PipelineStatisticsQuery,
@@ -1098,7 +1161,7 @@ impl crate::Context for Context {
         }
     }
 
-    fn adapter_downlevel_properties(
+    fn adapter_downlevel_capabilities(
         &self,
         _adapter: &Self::AdapterId,
     ) -> wgt::DownlevelCapabilities {
@@ -1213,21 +1276,25 @@ impl crate::Context for Context {
                 );
                 let spv_module_info = validator.validate(&spv_module).unwrap();
 
-                let wgsl_text = back::wgsl::write_string(&spv_module, &spv_module_info).unwrap();
+                let writer_flags = naga::back::wgsl::WriterFlags::empty();
+                let wgsl_text =
+                    back::wgsl::write_string(&spv_module, &spv_module_info, writer_flags).unwrap();
                 web_sys::GpuShaderModuleDescriptor::new(wgsl_text.as_str())
             }
             #[cfg(feature = "glsl")]
-            ShaderSource::Glsl {
+            crate::ShaderSource::Glsl {
                 ref shader,
                 stage,
                 ref defines,
             } => {
+                use naga::{back, front, valid};
+
                 // Parse the given shader code and store its representation.
-                let options = naga::front::glsl::Options {
+                let options = front::glsl::Options {
                     stage,
                     defines: defines.clone(),
                 };
-                let mut parser = naga::front::glsl::Parser::default();
+                let mut parser = front::glsl::Parser::default();
                 let glsl_module = parser.parse(&options, shader).unwrap();
 
                 let mut validator = valid::Validator::new(
@@ -1236,7 +1303,10 @@ impl crate::Context for Context {
                 );
                 let glsl_module_info = validator.validate(&glsl_module).unwrap();
 
-                let wgsl_text = back::wgsl::write_string(&glsl_module, &glsl_module_info).unwrap();
+                let writer_flags = naga::back::wgsl::WriterFlags::empty();
+                let wgsl_text =
+                    back::wgsl::write_string(&glsl_module, &glsl_module_info, writer_flags)
+                        .unwrap();
                 web_sys::GpuShaderModuleDescriptor::new(wgsl_text.as_str())
             }
             crate::ShaderSource::Wgsl(ref code) => web_sys::GpuShaderModuleDescriptor::new(code),
@@ -1283,15 +1353,18 @@ impl crate::Context for Context {
                         });
                         mapped_entry.buffer(&buffer);
                     }
-                    wgt::BindingType::Sampler {
-                        comparison,
-                        filtering,
-                    } => {
+                    wgt::BindingType::Sampler(ty) => {
                         let mut sampler = web_sys::GpuSamplerBindingLayout::new();
-                        sampler.type_(match (comparison, filtering) {
-                            (false, false) => web_sys::GpuSamplerBindingType::NonFiltering,
-                            (false, true) => web_sys::GpuSamplerBindingType::Filtering,
-                            (true, _) => web_sys::GpuSamplerBindingType::Comparison,
+                        sampler.type_(match ty {
+                            wgt::SamplerBindingType::NonFiltering => {
+                                web_sys::GpuSamplerBindingType::NonFiltering
+                            }
+                            wgt::SamplerBindingType::Filtering => {
+                                web_sys::GpuSamplerBindingType::Filtering
+                            }
+                            wgt::SamplerBindingType::Comparison => {
+                                web_sys::GpuSamplerBindingType::Comparison
+                            }
                         });
                         mapped_entry.sampler(&sampler);
                     }
@@ -1377,6 +1450,9 @@ impl crate::Context for Context {
                         panic!("Web backend does not support arrays of buffers")
                     }
                     crate::BindingResource::Sampler(sampler) => JsValue::from(sampler.id.0.clone()),
+                    crate::BindingResource::SamplerArray(..) => {
+                        panic!("Web backend does not support arrays of samplers")
+                    }
                     crate::BindingResource::TextureView(texture_view) => {
                         JsValue::from(texture_view.id.0.clone())
                     }
@@ -1619,8 +1695,9 @@ impl crate::Context for Context {
         // Device is dropped automatically
     }
 
-    fn device_poll(&self, _device: &Self::DeviceId, _maintain: crate::Maintain) {
+    fn device_poll(&self, _device: &Self::DeviceId, _maintain: crate::Maintain) -> bool {
         // Device is polled automatically
+        true
     }
 
     fn device_on_uncaptured_error(
@@ -1629,17 +1706,8 @@ impl crate::Context for Context {
         handler: impl crate::UncapturedErrorHandler,
     ) {
         let f = Closure::wrap(Box::new(move |event: web_sys::GpuUncapturedErrorEvent| {
-            // Convert the JS error into a wgpu error.
-            let js_error = event.error();
-            let source = Box::<dyn std::error::Error + Send + Sync>::from("<WebGPU Error>");
-            if let Some(js_error) = js_error.dyn_ref::<web_sys::GpuValidationError>() {
-                handler(crate::Error::ValidationError {
-                    source,
-                    description: js_error.message(),
-                });
-            } else if js_error.has_type::<web_sys::GpuOutOfMemoryError>() {
-                handler(crate::Error::OutOfMemoryError { source });
-            }
+            let error = crate::Error::from_js(event.error());
+            handler(error);
         }) as Box<dyn FnMut(_)>);
         device
             .0
@@ -1648,22 +1716,50 @@ impl crate::Context for Context {
         f.forget();
     }
 
+    fn device_push_error_scope(&self, device: &Self::DeviceId, filter: crate::ErrorFilter) {
+        device.0.push_error_scope(match filter {
+            crate::ErrorFilter::OutOfMemory => web_sys::GpuErrorFilter::OutOfMemory,
+            crate::ErrorFilter::Validation => web_sys::GpuErrorFilter::Validation,
+        });
+    }
+
+    fn device_pop_error_scope(&self, device: &Self::DeviceId) -> Self::PopErrorScopeFuture {
+        let error_promise = device.0.pop_error_scope();
+        MakeSendFuture::new(
+            wasm_bindgen_futures::JsFuture::from(error_promise),
+            future_pop_error_scope,
+        )
+    }
+
     fn buffer_map_async(
         &self,
         buffer: &Self::BufferId,
         mode: crate::MapMode,
         range: Range<wgt::BufferAddress>,
-    ) -> Self::MapAsyncFuture {
+        callback: impl FnOnce(Result<(), crate::BufferAsyncError>) + Send + 'static,
+    ) {
         let map_promise = buffer.0.map_async_with_f64_and_f64(
             map_map_mode(mode),
             range.start as f64,
             (range.end - range.start) as f64,
         );
 
-        MakeSendFuture::new(
-            wasm_bindgen_futures::JsFuture::from(map_promise),
-            future_map_async,
-        )
+        // Both the 'success' and 'rejected' closures need access to callback, but only one
+        // of them will ever run. We have them both hold a reference to a `Rc<RefCell<Option<impl FnOnce...>>>`,
+        // and then take ownership of callback when invoked.
+        //
+        // We also only need Rc's because these will only ever be called on our thread.
+        let rc_callback = Rc::new(RefCell::new(Some(callback)));
+
+        let rc_callback_clone = rc_callback.clone();
+        let closure_success = wasm_bindgen::closure::Closure::once(move |_| {
+            rc_callback.borrow_mut().take().unwrap()(Ok(()))
+        });
+        let closure_rejected = wasm_bindgen::closure::Closure::once(move |_| {
+            rc_callback_clone.borrow_mut().take().unwrap()(Err(crate::BufferAsyncError))
+        });
+
+        let _ = map_promise.then2(&closure_success, &closure_rejected);
     }
 
     fn buffer_get_mapped_range(
@@ -1988,6 +2084,7 @@ impl crate::Context for Context {
         _texture: &crate::Texture,
         _subresource_range: &wgt::ImageSubresourceRange,
     ) {
+        //TODO
     }
 
     fn command_encoder_clear_buffer(
@@ -1997,6 +2094,7 @@ impl crate::Context for Context {
         _offset: wgt::BufferAddress,
         _size: Option<wgt::BufferSize>,
     ) {
+        //TODO
     }
 
     fn command_encoder_insert_debug_marker(&self, _encoder: &Self::CommandEncoderId, _label: &str) {
@@ -2116,10 +2214,12 @@ impl crate::Context for Context {
         &self,
         queue: &Self::QueueId,
         command_buffers: I,
-    ) {
+    ) -> Self::SubmissionIndex {
         let temp_command_buffers = command_buffers.map(|i| i.0).collect::<js_sys::Array>();
 
         queue.0.submit(&temp_command_buffers);
+
+        // SubmissionIndex is (), so just let this function end
     }
 
     fn queue_get_timestamp_period(&self, _queue: &Self::QueueId) -> f32 {
@@ -2129,7 +2229,8 @@ impl crate::Context for Context {
     fn queue_on_submitted_work_done(
         &self,
         _queue: &Self::QueueId,
-    ) -> Self::OnSubmittedWorkDoneFuture {
+        _callback: Box<dyn FnOnce() + Send + 'static>,
+    ) {
         unimplemented!()
     }
 

@@ -1,8 +1,8 @@
 use crate::{
-    backend::native_gpu_future, AdapterInfo, BindGroupDescriptor, BindGroupLayoutDescriptor,
-    BindingResource, BufferBinding, CommandEncoderDescriptor, ComputePassDescriptor,
-    ComputePipelineDescriptor, DownlevelCapabilities, Features, Label, Limits, LoadOp, MapMode,
-    Operations, PipelineLayoutDescriptor, RenderBundleEncoderDescriptor, RenderPipelineDescriptor,
+    AdapterInfo, BindGroupDescriptor, BindGroupLayoutDescriptor, BindingResource, BufferBinding,
+    CommandEncoderDescriptor, ComputePassDescriptor, ComputePipelineDescriptor,
+    DownlevelCapabilities, Features, Label, Limits, LoadOp, MapMode, Operations,
+    PipelineLayoutDescriptor, RenderBundleEncoderDescriptor, RenderPipelineDescriptor,
     SamplerDescriptor, ShaderModuleDescriptor, ShaderModuleDescriptorSpirV, ShaderSource,
     SurfaceStatus, TextureDescriptor, TextureFormat, TextureViewDescriptor,
 };
@@ -38,7 +38,7 @@ impl fmt::Debug for Context {
 }
 
 impl Context {
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub unsafe fn from_hal_instance<A: wgc::hub::HalApi>(hal_instance: A::Instance) -> Self {
         Self(wgc::hub::Global::from_hal_instance::<A>(
             "wgpu",
@@ -47,11 +47,19 @@ impl Context {
         ))
     }
 
+    #[cfg(any(not(target_arch = "wasm32"), feature = "webgl2"))]
+    pub unsafe fn instance_as_hal<A: wgc::hub::HalApi, F: FnOnce(Option<&A::Instance>) -> R, R>(
+        &self,
+        hal_instance_callback: F,
+    ) -> R {
+        self.0.instance_as_hal::<A, F, R>(hal_instance_callback)
+    }
+
     pub(crate) fn global(&self) -> &wgc::hub::Global<wgc::hub::IdentityManagerFactory> {
         &self.0
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub fn enumerate_adapters(&self, backends: wgt::Backends) -> Vec<wgc::id::AdapterId> {
         self.0
             .enumerate_adapters(wgc::instance::AdapterInputs::Mask(backends, |_| {
@@ -59,7 +67,7 @@ impl Context {
             }))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub unsafe fn create_adapter_from_hal<A: wgc::hub::HalApi>(
         &self,
         hal_adapter: hal::ExposedAdapter<A>,
@@ -67,7 +75,17 @@ impl Context {
         self.0.create_adapter_from_hal(hal_adapter, PhantomData)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "webgl2"))]
+    pub unsafe fn adapter_as_hal<A: wgc::hub::HalApi, F: FnOnce(Option<&A::Adapter>) -> R, R>(
+        &self,
+        adapter: wgc::id::AdapterId,
+        hal_adapter_callback: F,
+    ) -> R {
+        self.0
+            .adapter_as_hal::<A, F, R>(adapter, hal_adapter_callback)
+    }
+
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub unsafe fn create_device_from_hal<A: wgc::hub::HalApi>(
         &self,
         adapter: &wgc::id::AdapterId,
@@ -94,7 +112,7 @@ impl Context {
         Ok((device, device_id))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub unsafe fn create_texture_from_hal<A: wgc::hub::HalApi>(
         &self,
         hal_texture: A::Texture,
@@ -123,7 +141,17 @@ impl Context {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
+    pub unsafe fn device_as_hal<A: wgc::hub::HalApi, F: FnOnce(Option<&A::Device>) -> R, R>(
+        &self,
+        device: &Device,
+        hal_device_callback: F,
+    ) -> R {
+        self.0
+            .device_as_hal::<A, F, R>(device.id, hal_device_callback)
+    }
+
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub unsafe fn texture_as_hal<A: wgc::hub::HalApi, F: FnOnce(Option<&A::Texture>)>(
         &self,
         texture: &Texture,
@@ -133,7 +161,7 @@ impl Context {
             .texture_as_hal::<A, F>(texture.id, hal_texture_callback)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
     pub fn generate_report(&self) -> wgc::hub::GlobalReport {
         self.0.generate_report()
     }
@@ -144,6 +172,49 @@ impl Context {
         layer: *mut std::ffi::c_void,
     ) -> crate::Surface {
         let id = self.0.instance_create_surface_metal(layer, PhantomData);
+        crate::Surface {
+            context: Arc::clone(self),
+            id: Surface {
+                id,
+                configured_device: Mutex::default(),
+            },
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "webgl", not(feature = "emscripten")))]
+    pub fn instance_create_surface_from_canvas(
+        self: &Arc<Self>,
+        canvas: &web_sys::HtmlCanvasElement,
+    ) -> Surface {
+        let id = self.0.create_surface_webgl_canvas(canvas, PhantomData);
+        Surface {
+            id,
+            configured_device: Mutex::default(),
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "webgl", not(feature = "emscripten")))]
+    pub fn instance_create_surface_from_offscreen_canvas(
+        self: &Arc<Self>,
+        canvas: &web_sys::OffscreenCanvas,
+    ) -> Surface {
+        let id = self
+            .0
+            .create_surface_webgl_offscreen_canvas(canvas, PhantomData);
+        Surface {
+            id,
+            configured_device: Mutex::default(),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub unsafe fn create_surface_from_visual(
+        self: &Arc<Self>,
+        visual: *mut std::ffi::c_void,
+    ) -> crate::Surface {
+        let id = self
+            .0
+            .instance_create_surface_from_visual(visual, PhantomData);
         crate::Surface {
             context: Arc::clone(self),
             id: Surface {
@@ -167,13 +238,13 @@ impl Context {
             label: label.unwrap_or_default().to_string(),
             label_key,
         };
-        let sink = sink_mutex.lock();
+        let mut sink = sink_mutex.lock();
         let mut source_opt: Option<&(dyn Error + 'static)> = Some(&error);
         while let Some(source) = source_opt {
             if let Some(wgc::device::DeviceError::OutOfMemory) =
                 source.downcast_ref::<wgc::device::DeviceError>()
             {
-                return sink.handle_error(crate::Error::OutOfMemoryError {
+                return sink.handle_error(crate::Error::OutOfMemory {
                     source: Box::new(error),
                 });
             }
@@ -181,7 +252,7 @@ impl Context {
         }
 
         // Otherwise, it is a validation error
-        sink.handle_error(crate::Error::ValidationError {
+        sink.handle_error(crate::Error::Validation {
             description: self.format_error(&error),
             source: Box::new(error),
         });
@@ -294,15 +365,19 @@ mod pass_impl {
             wgpu_compute_pass_end_pipeline_statistics_query(self)
         }
 
-        fn dispatch(&mut self, x: u32, y: u32, z: u32) {
-            wgpu_compute_pass_dispatch(self, x, y, z)
+        fn dispatch_workgroups(&mut self, x: u32, y: u32, z: u32) {
+            wgpu_compute_pass_dispatch_workgroups(self, x, y, z)
         }
-        fn dispatch_indirect(
+        fn dispatch_workgroups_indirect(
             &mut self,
             indirect_buffer: &super::Buffer,
             indirect_offset: wgt::BufferAddress,
         ) {
-            wgpu_compute_pass_dispatch_indirect(self, indirect_buffer.id, indirect_offset)
+            wgpu_compute_pass_dispatch_workgroups_indirect(
+                self,
+                indirect_buffer.id,
+                indirect_offset,
+            )
         }
     }
 
@@ -751,13 +826,13 @@ impl crate::Context for Context {
     type SurfaceId = Surface;
 
     type SurfaceOutputDetail = SurfaceOutputDetail;
+    type SubmissionIndex = wgc::device::queue::WrappedSubmissionIndex;
 
     type RequestAdapterFuture = Ready<Option<Self::AdapterId>>;
     #[allow(clippy::type_complexity)]
     type RequestDeviceFuture =
         Ready<Result<(Self::DeviceId, Self::QueueId), crate::RequestDeviceError>>;
-    type MapAsyncFuture = native_gpu_future::GpuFuture<Result<(), crate::BufferAsyncError>>;
-    type OnSubmittedWorkDoneFuture = native_gpu_future::GpuFuture<()>;
+    type PopErrorScopeFuture = Ready<Option<crate::Error>>;
 
     fn init(backends: wgt::Backends) -> Self {
         Self(wgc::hub::Global::new(
@@ -792,10 +867,10 @@ impl crate::Context for Context {
         ready(id.ok())
     }
 
-    fn instance_poll_all_devices(&self, force_wait: bool) {
+    fn instance_poll_all_devices(&self, force_wait: bool) -> bool {
         let global = &self.0;
         match global.poll_all_devices(force_wait) {
-            Ok(()) => (),
+            Ok(all_queue_empty) => all_queue_empty,
             Err(err) => self.handle_error_fatal(err, "Device::poll"),
         }
     }
@@ -854,9 +929,9 @@ impl crate::Context for Context {
         }
     }
 
-    fn adapter_downlevel_properties(&self, adapter: &Self::AdapterId) -> DownlevelCapabilities {
+    fn adapter_downlevel_capabilities(&self, adapter: &Self::AdapterId) -> DownlevelCapabilities {
         let global = &self.0;
-        match wgc::gfx_select!(*adapter => global.adapter_downlevel_properties(*adapter)) {
+        match wgc::gfx_select!(*adapter => global.adapter_downlevel_capabilities(*adapter)) {
             Ok(downlevel) => downlevel,
             Err(err) => self.handle_error_fatal(err, "Adapter::downlevel_properties"),
         }
@@ -1104,15 +1179,20 @@ impl crate::Context for Context {
         use wgc::binding_model as bm;
 
         let mut arrayed_texture_views = Vec::new();
+        let mut arrayed_samplers = Vec::new();
         if device.features.contains(Features::TEXTURE_BINDING_ARRAY) {
             // gather all the array view IDs first
             for entry in desc.entries.iter() {
                 if let BindingResource::TextureViewArray(array) = entry.resource {
                     arrayed_texture_views.extend(array.iter().map(|view| view.id));
                 }
+                if let BindingResource::SamplerArray(array) = entry.resource {
+                    arrayed_samplers.extend(array.iter().map(|sampler| sampler.id));
+                }
             }
         }
         let mut remaining_arrayed_texture_views = &arrayed_texture_views[..];
+        let mut remaining_arrayed_samplers = &arrayed_samplers[..];
 
         let mut arrayed_buffer_bindings = Vec::new();
         if device.features.contains(Features::BUFFER_BINDING_ARRAY) {
@@ -1151,6 +1231,11 @@ impl crate::Context for Context {
                         bm::BindingResource::BufferArray(Borrowed(slice))
                     }
                     BindingResource::Sampler(sampler) => bm::BindingResource::Sampler(sampler.id),
+                    BindingResource::SamplerArray(array) => {
+                        let slice = &remaining_arrayed_samplers[..array.len()];
+                        remaining_arrayed_samplers = &remaining_arrayed_samplers[array.len()..];
+                        bm::BindingResource::SamplerArray(Borrowed(slice))
+                    }
                     BindingResource::TextureView(texture_view) => {
                         bm::BindingResource::TextureView(texture_view.id)
                     }
@@ -1275,6 +1360,7 @@ impl crate::Context for Context {
                 },
                 targets: Borrowed(frag.targets),
             }),
+            multiview: desc.multiview,
         };
 
         let global = &self.0;
@@ -1286,8 +1372,8 @@ impl crate::Context for Context {
         ));
         if let Some(cause) = error {
             if let wgc::pipeline::CreateRenderPipelineError::Internal { stage, ref error } = cause {
-                log::warn!("Shader translation error for stage {:?}: {}", stage, error);
-                log::warn!("Please report it to https://github.com/gfx-rs/naga");
+                log::error!("Shader translation error for stage {:?}: {}", stage, error);
+                log::error!("Please report it to https://github.com/gfx-rs/naga");
             }
             self.handle_error(
                 &device.error_sink,
@@ -1496,6 +1582,7 @@ impl crate::Context for Context {
             color_formats: Borrowed(desc.color_formats),
             depth_stencil: desc.depth_stencil,
             sample_count: desc.sample_count,
+            multiview: desc.multiview,
         };
         match wgc::command::RenderBundleEncoder::new(&descriptor, device.id, None) {
             Ok(id) => id,
@@ -1505,33 +1592,28 @@ impl crate::Context for Context {
 
     #[cfg_attr(target_arch = "wasm32", allow(unused))]
     fn device_drop(&self, device: &Self::DeviceId) {
-        #[cfg(not(target_arch = "wasm32"))]
+        let global = &self.0;
+
+        #[cfg(any(not(target_arch = "wasm32"), feature = "emscripten"))]
         {
-            let global = &self.0;
-            match wgc::gfx_select!(device.id => global.device_poll(device.id, true)) {
-                Ok(()) => (),
+            match wgc::gfx_select!(device.id => global.device_poll(device.id, wgt::Maintain::Wait))
+            {
+                Ok(_) => (),
                 Err(err) => self.handle_error_fatal(err, "Device::drop"),
             }
         }
-        //TODO: make this work in general
-        #[cfg(not(target_arch = "wasm32"))]
-        #[cfg(feature = "metal-auto-capture")]
-        {
-            let global = &self.0;
-            wgc::gfx_select!(device.id => global.device_drop(device.id));
-        }
+
+        wgc::gfx_select!(device.id => global.device_drop(device.id));
     }
 
-    fn device_poll(&self, device: &Self::DeviceId, maintain: crate::Maintain) {
+    fn device_poll(&self, device: &Self::DeviceId, maintain: crate::Maintain) -> bool {
         let global = &self.0;
+        let maintain_inner = maintain.map_index(|i| i.0);
         match wgc::gfx_select!(device.id => global.device_poll(
             device.id,
-            match maintain {
-                crate::Maintain::Poll => false,
-                crate::Maintain::Wait => true,
-            }
+            maintain_inner
         )) {
-            Ok(()) => (),
+            Ok(queue_empty) => queue_empty,
             Err(err) => self.handle_error_fatal(err, "Device::poll"),
         }
     }
@@ -1545,33 +1627,39 @@ impl crate::Context for Context {
         error_sink.uncaptured_handler = Box::new(handler);
     }
 
+    fn device_push_error_scope(&self, device: &Self::DeviceId, filter: crate::ErrorFilter) {
+        let mut error_sink = device.error_sink.lock();
+        error_sink.scopes.push(ErrorScope {
+            error: None,
+            filter,
+        });
+    }
+
+    fn device_pop_error_scope(&self, device: &Self::DeviceId) -> Self::PopErrorScopeFuture {
+        let mut error_sink = device.error_sink.lock();
+        let scope = error_sink.scopes.pop().unwrap();
+        ready(scope.error)
+    }
+
     fn buffer_map_async(
         &self,
         buffer: &Self::BufferId,
         mode: MapMode,
         range: Range<wgt::BufferAddress>,
-    ) -> Self::MapAsyncFuture {
-        let (future, completion) = native_gpu_future::new_gpu_future();
-
-        extern "C" fn buffer_map_future_wrapper(
-            status: wgc::resource::BufferMapAsyncStatus,
-            user_data: *mut u8,
-        ) {
-            let completion =
-                unsafe { native_gpu_future::GpuFutureCompletion::from_raw(user_data as _) };
-            completion.complete(match status {
-                wgc::resource::BufferMapAsyncStatus::Success => Ok(()),
-                _ => Err(crate::BufferAsyncError),
-            })
-        }
-
+        callback: impl FnOnce(Result<(), crate::BufferAsyncError>) + Send + 'static,
+    ) {
         let operation = wgc::resource::BufferMapOperation {
             host: match mode {
                 MapMode::Read => wgc::device::HostMap::Read,
                 MapMode::Write => wgc::device::HostMap::Write,
             },
-            callback: buffer_map_future_wrapper,
-            user_data: completion.into_raw() as _,
+            callback: wgc::resource::BufferMapCallback::from_rust(Box::new(|status| {
+                let res = match status {
+                    wgc::resource::BufferMapAsyncStatus::Success => Ok(()),
+                    _ => Err(crate::BufferAsyncError),
+                };
+                callback(res);
+            })),
         };
 
         let global = &self.0;
@@ -1579,7 +1667,6 @@ impl crate::Context for Context {
             Ok(()) => (),
             Err(cause) => self.handle_error_nolabel(&buffer.error_sink, cause, "Buffer::map_async"),
         }
-        future
     }
 
     fn buffer_get_mapped_range(
@@ -2021,7 +2108,7 @@ impl crate::Context for Context {
             buffer.id.id,
             offset, size
         )) {
-            self.handle_error_nolabel(&encoder.error_sink, cause, "CommandEncoder::clear_buffer");
+            self.handle_error_nolabel(&encoder.error_sink, cause, "CommandEncoder::fill_buffer");
         }
     }
 
@@ -2137,12 +2224,12 @@ impl crate::Context for Context {
         &self,
         queue: &Self::QueueId,
         command_buffers: I,
-    ) {
+    ) -> Self::SubmissionIndex {
         let temp_command_buffers = command_buffers.collect::<SmallVec<[_; 4]>>();
 
         let global = &self.0;
         match wgc::gfx_select!(*queue => global.queue_submit(*queue, &temp_command_buffers)) {
-            Ok(()) => (),
+            Ok(index) => index,
             Err(err) => self.handle_error_fatal(err, "Queue::submit"),
         }
     }
@@ -2163,26 +2250,15 @@ impl crate::Context for Context {
     fn queue_on_submitted_work_done(
         &self,
         queue: &Self::QueueId,
-    ) -> Self::OnSubmittedWorkDoneFuture {
-        let (future, completion) = native_gpu_future::new_gpu_future();
-
-        extern "C" fn submitted_work_done_future_wrapper(user_data: *mut u8) {
-            let completion =
-                unsafe { native_gpu_future::GpuFutureCompletion::from_raw(user_data as _) };
-            completion.complete(())
-        }
-
-        let closure = wgc::device::queue::SubmittedWorkDoneClosure {
-            callback: submitted_work_done_future_wrapper,
-            user_data: completion.into_raw() as _,
-        };
+        callback: Box<dyn FnOnce() + Send + 'static>,
+    ) {
+        let closure = wgc::device::queue::SubmittedWorkDoneClosure::from_rust(callback);
 
         let global = &self.0;
         let res = wgc::gfx_select!(queue => global.queue_on_submitted_work_done(*queue, closure));
         if let Err(cause) = res {
             self.handle_error_fatal(cause, "Queue::on_submitted_work_done");
         }
-        future
     }
 
     fn device_start_capture(&self, device: &Self::DeviceId) {
@@ -2203,19 +2279,44 @@ pub(crate) struct SurfaceOutputDetail {
 
 type ErrorSink = Arc<Mutex<ErrorSinkRaw>>;
 
+struct ErrorScope {
+    error: Option<crate::Error>,
+    filter: crate::ErrorFilter,
+}
+
 struct ErrorSinkRaw {
+    scopes: Vec<ErrorScope>,
     uncaptured_handler: Box<dyn crate::UncapturedErrorHandler>,
 }
 
 impl ErrorSinkRaw {
     fn new() -> ErrorSinkRaw {
         ErrorSinkRaw {
+            scopes: Vec::new(),
             uncaptured_handler: Box::from(default_error_handler),
         }
     }
 
-    fn handle_error(&self, err: crate::Error) {
-        (self.uncaptured_handler)(err);
+    fn handle_error(&mut self, err: crate::Error) {
+        let filter = match err {
+            crate::Error::OutOfMemory { .. } => crate::ErrorFilter::OutOfMemory,
+            crate::Error::Validation { .. } => crate::ErrorFilter::Validation,
+        };
+        match self
+            .scopes
+            .iter_mut()
+            .rev()
+            .find(|scope| scope.filter == filter)
+        {
+            Some(scope) => {
+                if scope.error.is_none() {
+                    scope.error = Some(err);
+                }
+            }
+            None => {
+                (self.uncaptured_handler)(err);
+            }
+        }
     }
 }
 

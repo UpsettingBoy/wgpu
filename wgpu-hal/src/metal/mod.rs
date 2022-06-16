@@ -85,14 +85,14 @@ impl crate::Instance<Api> for Instance {
     ) -> Result<Surface, crate::InstanceError> {
         match has_handle.raw_window_handle() {
             #[cfg(target_os = "ios")]
-            raw_window_handle::RawWindowHandle::IOS(handle) => {
+            raw_window_handle::RawWindowHandle::UiKit(handle) => {
                 let _ = &self.managed_metal_layer_delegate;
-                Ok(Surface::from_uiview(handle.ui_view))
+                Ok(Surface::from_view(handle.ui_view, None))
             }
             #[cfg(target_os = "macos")]
-            raw_window_handle::RawWindowHandle::MacOS(handle) => Ok(Surface::from_nsview(
+            raw_window_handle::RawWindowHandle::AppKit(handle) => Ok(Surface::from_view(
                 handle.ns_view,
-                &self.managed_metal_layer_delegate,
+                Some(&self.managed_metal_layer_delegate),
             )),
             _ => Err(crate::InstanceError),
         }
@@ -114,11 +114,7 @@ impl crate::Instance<Api> for Instance {
                         name,
                         vendor: 0,
                         device: 0,
-                        device_type: if shared.private_caps.low_power {
-                            wgt::DeviceType::IntegratedGpu
-                        } else {
-                            wgt::DeviceType::DiscreteGpu
-                        },
+                        device_type: shared.private_caps.device_type(),
                         backend: wgt::Backend::Metal,
                     },
                     features: shared.private_caps.features(),
@@ -137,12 +133,16 @@ impl crate::Instance<Api> for Instance {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct PrivateCapabilities {
     family_check: bool,
     msl_version: mtl::MTLLanguageVersion,
     fragment_rw_storage: bool,
     read_write_texture_tier: mtl::MTLReadWriteTextureTier,
+    msaa_desktop: bool,
+    msaa_apple3: bool,
+    msaa_apple7: bool,
     resource_heaps: bool,
     argument_buffers: bool,
     shared_textures: bool,
@@ -166,6 +166,7 @@ struct PrivateCapabilities {
     format_bc: bool,
     format_eac_etc: bool,
     format_astc: bool,
+    format_astc_hdr: bool,
     format_any8_unorm_srgb_all: bool,
     format_any8_unorm_srgb_no_write: bool,
     format_any8_snorm_all: bool,
@@ -211,6 +212,8 @@ struct PrivateCapabilities {
     max_texture_layers: u64,
     max_fragment_input_components: u64,
     max_color_render_targets: u8,
+    max_varying_components: u32,
+    max_threads_per_group: u32,
     max_total_threadgroup_memory: u32,
     sample_count_mask: u8,
     supports_debug_markers: bool,
@@ -223,6 +226,8 @@ struct PrivateCapabilities {
     supports_arrays_of_textures_write: bool,
     supports_mutability: bool,
     supports_depth_clip_control: bool,
+    supports_preserve_invariance: bool,
+    has_unified_memory: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -230,6 +235,7 @@ struct PrivateDisabilities {
     /// Near depth is not respected properly on some Intel GPUs.
     broken_viewport_near_depth: bool,
     /// Multi-target clears don't appear to work properly on Intel GPUs.
+    #[allow(dead_code)]
     broken_layered_clear_image: bool,
 }
 
@@ -255,7 +261,7 @@ impl AdapterShared {
 
         Self {
             disabilities: PrivateDisabilities::new(&device),
-            private_caps: PrivateCapabilities::new(&device),
+            private_caps,
             device: Mutex::new(device),
             settings: Settings::default(),
         }
@@ -332,7 +338,7 @@ impl crate::Queue<Api> for Queue {
                                 .to_owned()
                         }
                     };
-                    raw.set_label("_Signal");
+                    raw.set_label("(wgpu internal) Signal");
                     raw.add_completed_handler(&block);
 
                     fence.maintain();
@@ -364,7 +370,7 @@ impl crate::Queue<Api> for Queue {
         let queue = &self.raw.lock();
         objc::rc::autoreleasepool(|| {
             let command_buffer = queue.new_command_buffer();
-            command_buffer.set_label("_Present");
+            command_buffer.set_label("(wgpu internal) Present");
 
             // https://developer.apple.com/documentation/quartzcore/cametallayer/1478157-presentswithtransaction?language=objc
             if !texture.present_with_transaction {
@@ -391,7 +397,6 @@ impl crate::Queue<Api> for Queue {
 pub struct Buffer {
     raw: mtl::Buffer,
     size: wgt::BufferAddress,
-    options: mtl::MTLResourceOptions,
 }
 
 unsafe impl Send for Buffer {}
@@ -521,6 +526,7 @@ pub struct PipelineLayout {
     bind_group_infos: ArrayVec<BindGroupLayoutInfo, { crate::MAX_BIND_GROUPS }>,
     push_constants_infos: MultiStageData<Option<PushConstantsInfo>>,
     total_counters: MultiStageResourceCounters,
+    total_push_constants: u32,
 }
 
 trait AsNative {
@@ -706,6 +712,7 @@ struct CommandState {
     stage_infos: MultiStageData<PipelineStageInfo>,
     storage_buffer_length_map: fxhash::FxHashMap<naga::ResourceBinding, wgt::BufferSize>,
     work_group_memory_sizes: Vec<u32>,
+    push_constants: Vec<u32>,
 }
 
 pub struct CommandEncoder {
